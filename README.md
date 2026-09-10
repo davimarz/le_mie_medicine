@@ -1,35 +1,54 @@
 # I miei farmaci
 
-Web app Flask per la gestione personale dei farmaci, delle quantità e delle scadenze, con supporto alla ricerca dei medicinali tramite codice AIC e archivio AIFA.
+Applicazione Streamlit per la gestione personale dei farmaci, delle quantità e delle scadenze, con ricerca tramite codice AIC e archivio AIFA.
 
-## Funzioni principali
+## Funzioni
 
 - registrazione e accesso utenti
-- elenco personale dei farmaci
+- password salvate con hash sicuro
+- compatibilità con i vecchi account Flask
+- gestione farmaci personali
 - quantità e scadenze
-- segnalazione dei farmaci scaduti o prossimi alla scadenza
+- evidenza dei farmaci scaduti o in scadenza entro 30 giorni
 - ricerca tramite codice AIC
-- importazione locale del dataset `confezioni.csv` per popolare la cache AIFA
+- importazione del dataset AIFA `confezioni.csv`
+- esportazione dei propri farmaci in CSV
 
-## Avvio
+## Avvio locale
 
-1. Crea un ambiente virtuale Python.
-2. Installa le dipendenze con `pip install -r requirements.txt`.
-3. Imposta la variabile d'ambiente `SECRET_KEY`.
-4. Assicurati che le pagine HTML richieste dall'app siano presenti nella cartella `templates/`.
-5. Avvia l'applicazione secondo la configurazione del server Flask/PythonAnywhere.
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-## File non inclusi nel repository
+## Pubblicazione su Streamlit Community Cloud
 
-Per motivi di privacy e dimensione non vengono versionati:
+1. Accedi a Streamlit Community Cloud con il tuo account GitHub.
+2. Crea una nuova app.
+3. Seleziona il repository `davimarz/le_mie_medicine`.
+4. Seleziona il branch `main`.
+5. Imposta `app.py` come Main file path.
+6. Avvia il deployment.
+
+Non è necessaria una `SECRET_KEY`: l'accesso utente usa la sessione Streamlit e le password vengono archiviate con hash.
+
+## Archivio AIFA
+
+`confezioni.csv` non viene inserito nel repository. Dopo l'accesso apri **Archivio AIFA** e carica il CSV dalla pagina dell'app. L'importazione popola la tabella `aifa_cache`.
+
+## Database
+
+Per mantenere compatibilità con la versione precedente l'app utilizza SQLite e il file `farmaci.db`. Il file è escluso da GitHub perché può contenere dati personali.
+
+### Nota importante per Streamlit Community Cloud
+
+Il filesystem di un'app cloud non deve essere considerato un archivio permanente. SQLite va bene per prove e uso locale, ma per un'app pubblica con utenti reali è consigliato collegare un database persistente esterno, ad esempio PostgreSQL/Supabase.
+
+## File esclusi da GitHub
 
 - `farmaci.db`
 - `utenti_registrati.csv`
 - `confezioni.csv`
-- file `.env`
+- `.env` e altri file con segreti
 
-Il database e il CSV degli utenti possono contenere dati personali e non devono essere pubblicati.
-
-## Stato del repository
-
-Il codice Python principale è in `app.py`. Le cartelle `templates/` e gli eventuali asset statici usati dalla versione online devono essere aggiunti al repository quando disponibili.
+Il progetto non usa più Flask, i template HTML o il foglio CSS della vecchia versione: l'interfaccia è interamente gestita da Streamlit.
