@@ -1,0 +1,21 @@
+# Dati locali e sensibili
+farmaci.db
+*.db
+utenti_registrati.csv
+confezioni.csv
+
+# Segreti e configurazione locale
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / sistema
+.DS_Store
+.vscode/
+.idea/
