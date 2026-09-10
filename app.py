@@ -1,301 +1,519 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime
-import os
 import csv
-import calendar
+import io
+import sqlite3
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
-if not app.config['SECRET_KEY']:
-    raise RuntimeError("SECRET_KEY non configurata: imposta la variabile d'ambiente SECRET_KEY")
+import pandas as pd
+import streamlit as st
+from werkzeug.security import check_password_hash, generate_password_hash
 
-basedir = os.path.abspath(os.path.dirname(__file__))
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'farmaci.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+APP_DIR = Path(__file__).resolve().parent
+DB_PATH = APP_DIR / "farmaci.db"
 
-db = SQLAlchemy(app)
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
-
-
-class User(UserMixin, db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(150), unique=True, nullable=False)
-    email = db.Column(db.String(150), unique=True, nullable=False)
-    password = db.Column(db.String(255), nullable=False)
+st.set_page_config(
+    page_title="I miei farmaci",
+    page_icon="💊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 
-class Farmaco(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    nome = db.Column(db.String(100), nullable=False)
-    descrizione = db.Column(db.String(300), nullable=True)
-    principio_attivo = db.Column(db.String(300), nullable=True)
-    quantita = db.Column(db.Integer, nullable=False)
-    tipo = db.Column(db.String(50), nullable=False, default='Pezzi')
-    scadenza = db.Column(db.Date, nullable=False)
-    aic = db.Column(db.String(50))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+# -----------------------------
+# Database
+# -----------------------------
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-class AifaCache(db.Model):
-    aic = db.Column(db.String(20), primary_key=True)
-    descrizione = db.Column(db.String(300))
-    principio_attivo = db.Column(db.String(300))
-    ditta = db.Column(db.String(150))
-
-
-@login_manager.user_loader
-def load_user(user_id):
-    return db.session.get(User, int(user_id))
-
-
-def password_is_valid(user, supplied_password):
-    """Accetta temporaneamente anche vecchie password in chiaro e le migra al primo accesso."""
-    stored = user.password or ''
-    looks_hashed = stored.startswith(('scrypt:', 'pbkdf2:'))
-    if looks_hashed:
-        return check_password_hash(stored, supplied_password)
-    if stored == supplied_password:
-        user.password = generate_password_hash(supplied_password)
-        db.session.commit()
-        return True
-    return False
-
-
-@app.route('/')
-def home():
-    return redirect(url_for('dashboard'))
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        username = (request.form.get('username') or '').strip()
-        password = request.form.get('password') or ''
-        user = User.query.filter_by(username=username).first()
-        if user and password_is_valid(user, password):
-            login_user(user)
-            return redirect(url_for('dashboard'))
-        flash('Credenziali errate')
-    return render_template('login.html')
-
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        username = (request.form.get('username') or '').strip()
-        email = (request.form.get('email') or '').strip().lower()
-        password = request.form.get('password') or ''
-
-        if len(password) < 8:
-            flash('La password deve contenere almeno 8 caratteri')
-            return redirect(url_for('register'))
-        if User.query.filter_by(username=username).first():
-            flash('Nome utente già in uso')
-            return redirect(url_for('register'))
-        if User.query.filter_by(email=email).first():
-            flash('Email già registrata')
-            return redirect(url_for('register'))
-
-        new_user = User(
-            username=username,
-            email=email,
-            password=generate_password_hash(password),
+def init_db():
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username VARCHAR(150) UNIQUE NOT NULL,
+                email VARCHAR(150) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL
+            )
+            """
         )
-        db.session.add(new_user)
-        db.session.commit()
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS farmaco (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome VARCHAR(100) NOT NULL,
+                descrizione VARCHAR(300),
+                principio_attivo VARCHAR(300),
+                quantita INTEGER NOT NULL,
+                tipo VARCHAR(50) NOT NULL DEFAULT 'Pezzi',
+                scadenza DATE NOT NULL,
+                aic VARCHAR(50),
+                user_id INTEGER NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES user(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS aifa_cache (
+                aic VARCHAR(20) PRIMARY KEY,
+                descrizione VARCHAR(300),
+                principio_attivo VARCHAR(300),
+                ditta VARCHAR(150)
+            )
+            """
+        )
+        conn.commit()
 
-        csv_path = os.path.join(basedir, 'utenti_registrati.csv')
-        file_exists = os.path.isfile(csv_path)
+
+def get_user_by_username(username):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM user WHERE username = ?", (username.strip(),)
+        ).fetchone()
+
+
+def register_user(username, email, password):
+    username = username.strip()
+    email = email.strip().lower()
+    if not username or not email or not password:
+        return False, "Compila tutti i campi."
+    if len(password) < 6:
+        return False, "La password deve contenere almeno 6 caratteri."
+
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO user (username, email, password) VALUES (?, ?, ?)",
+                (username, email, generate_password_hash(password)),
+            )
+            conn.commit()
+        return True, "Registrazione completata."
+    except sqlite3.IntegrityError:
+        return False, "Username o email già registrati."
+
+
+def verify_password(user, password):
+    stored = user["password"] or ""
+    try:
+        if stored.startswith(("scrypt:", "pbkdf2:")):
+            return check_password_hash(stored, password), None
+    except ValueError:
+        pass
+
+    # Compatibilità con i vecchi account Flask che avevano password in chiaro.
+    if stored == password:
+        new_hash = generate_password_hash(password)
+        with get_conn() as conn:
+            conn.execute("UPDATE user SET password = ? WHERE id = ?", (new_hash, user["id"]))
+            conn.commit()
+        return True, "Password aggiornata automaticamente in formato sicuro."
+
+    return False, None
+
+
+def list_medicines(user_id):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM farmaco WHERE user_id = ? ORDER BY nome COLLATE NOCASE",
+            (user_id,),
+        ).fetchall()
+
+
+def add_medicine(user_id, nome, descrizione, principio_attivo, quantita, tipo, scadenza, aic):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO farmaco
+            (nome, descrizione, principio_attivo, quantita, tipo, scadenza, aic, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                nome.strip(),
+                descrizione.strip(),
+                principio_attivo.strip(),
+                int(quantita),
+                tipo,
+                scadenza.isoformat(),
+                aic.strip(),
+                user_id,
+            ),
+        )
+        conn.commit()
+
+
+def update_quantity(medicine_id, user_id, quantity):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE farmaco SET quantita = ? WHERE id = ? AND user_id = ?",
+            (int(quantity), medicine_id, user_id),
+        )
+        conn.commit()
+
+
+def delete_medicine(medicine_id, user_id):
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM farmaco WHERE id = ? AND user_id = ?",
+            (medicine_id, user_id),
+        )
+        conn.commit()
+
+
+def find_aifa(aic):
+    code = (aic or "").strip().upper()
+    if code.startswith("A") and code[1:].isdigit():
+        code = code[1:]
+
+    candidates = [code]
+    if code.isdigit():
+        candidates.append(code.zfill(9))
+        if code.startswith("0"):
+            candidates.append(code[1:])
+
+    with get_conn() as conn:
+        for candidate in dict.fromkeys(candidates):
+            row = conn.execute(
+                "SELECT * FROM aifa_cache WHERE aic = ?", (candidate,)
+            ).fetchone()
+            if row:
+                return row
+    return None
+
+
+def import_aifa(uploaded_file):
+    raw = uploaded_file.getvalue()
+    text = None
+    for encoding in ("utf-8-sig", "latin-1"):
         try:
-            with open(csv_path, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(['Data_Registrazione', 'Username', 'Email'])
-                writer.writerow([datetime.now().strftime('%Y-%m-%d %H:%M:%S'), username, email])
-        except Exception as e:
-            print(f'Errore CSV: {e}')
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise ValueError("Codifica del CSV non riconosciuta.")
 
-        login_user(new_user)
-        return redirect(url_for('dashboard'))
-    return render_template('register.html')
+    sample = text[:5000]
+    delimiter = ";" if sample.count(";") >= sample.count(",") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    if not reader.fieldnames:
+        raise ValueError("CSV senza intestazioni.")
+
+    rows = []
+    for row in reader:
+        raw_aic = (row.get("codice_aic") or "").strip()
+        if raw_aic.isdigit():
+            raw_aic = raw_aic.zfill(9)
+
+        denominazione = (row.get("denominazione") or "").strip()
+        descrizione = (row.get("descrizione") or "").strip()
+        ditta = (row.get("ragione_sociale") or "").strip()
+        principio = (
+            row.get("pa_associati")
+            or row.get("principio_attivo")
+            or ""
+        ).strip()
+
+        if raw_aic and denominazione:
+            rows.append(
+                (
+                    raw_aic,
+                    f"{denominazione} {descrizione}".strip()[:300],
+                    principio[:300],
+                    ditta[:150],
+                )
+            )
+
+    with get_conn() as conn:
+        conn.execute("DELETE FROM aifa_cache")
+        conn.executemany(
+            "INSERT OR REPLACE INTO aifa_cache (aic, descrizione, principio_attivo, ditta) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    return len(rows)
 
 
-@app.route('/dashboard')
-@login_required
-def dashboard():
-    farmaci = Farmaco.query.filter_by(user_id=current_user.id).order_by(Farmaco.nome).all()
-    aifa_count = AifaCache.query.count()
+def aifa_count():
+    with get_conn() as conn:
+        return conn.execute("SELECT COUNT(*) FROM aifa_cache").fetchone()[0]
 
-    today = datetime.now().date()
-    scaduti = sum(1 for f in farmaci if f.scadenza < today)
-    in_scadenza = sum(1 for f in farmaci if 0 <= (f.scadenza - today).days <= 30)
 
-    return render_template(
-        'dashboard.html',
-        farmaci=farmaci,
-        nome=current_user.username,
-        today=today,
-        aifa_count=aifa_count,
-        count_scaduti=scaduti,
-        count_scadenza=in_scadenza,
-        count_totale=len(farmaci),
+# -----------------------------
+# UI helpers
+# -----------------------------
+def parse_date(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return date.today()
+
+
+def logout():
+    st.session_state.pop("user_id", None)
+    st.session_state.pop("username", None)
+    st.rerun()
+
+
+def show_login():
+    st.title("I miei farmaci")
+    st.caption("Gestione personale di farmaci, quantità e scadenze")
+
+    login_tab, register_tab = st.tabs(["Accedi", "Registrati"])
+
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Accedi", use_container_width=True)
+
+        if submitted:
+            user = get_user_by_username(username)
+            if not user:
+                st.error("Credenziali non valide.")
+            else:
+                ok, note = verify_password(user, password)
+                if ok:
+                    st.session_state.user_id = user["id"]
+                    st.session_state.username = user["username"]
+                    if note:
+                        st.toast(note)
+                    st.rerun()
+                else:
+                    st.error("Credenziali non valide.")
+
+    with register_tab:
+        with st.form("register_form"):
+            new_username = st.text_input("Username", key="reg_username")
+            new_email = st.text_input("Email")
+            new_password = st.text_input("Password", type="password", key="reg_password")
+            confirm = st.text_input("Conferma password", type="password")
+            submitted = st.form_submit_button("Crea account", use_container_width=True)
+
+        if submitted:
+            if new_password != confirm:
+                st.error("Le password non coincidono.")
+            else:
+                ok, message = register_user(new_username, new_email, new_password)
+                if ok:
+                    st.success(message + " Ora puoi accedere.")
+                else:
+                    st.error(message)
+
+
+def show_dashboard():
+    medicines = list_medicines(st.session_state.user_id)
+    today = date.today()
+    expired = sum(parse_date(m["scadenza"]) < today for m in medicines)
+    expiring = sum(
+        today <= parse_date(m["scadenza"]) <= today + timedelta(days=30)
+        for m in medicines
+    )
+
+    st.title("La mia farmacia")
+    st.caption(f"Utente: {st.session_state.username}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Farmaci", len(medicines))
+    c2.metric("In scadenza", expiring)
+    c3.metric("Scaduti", expired)
+    c4.metric("Archivio AIFA", aifa_count())
+
+    st.divider()
+
+    if not medicines:
+        st.info("Non hai ancora inserito farmaci. Usa 'Aggiungi farmaco' dal menu laterale.")
+        return
+
+    query = st.text_input("Cerca nei tuoi farmaci", placeholder="Nome, principio attivo o AIC")
+    query_lower = query.strip().lower()
+
+    filtered = []
+    for med in medicines:
+        haystack = " ".join(
+            str(med[k] or "")
+            for k in ("nome", "descrizione", "principio_attivo", "aic")
+        ).lower()
+        if not query_lower or query_lower in haystack:
+            filtered.append(med)
+
+    for med in filtered:
+        expiry = parse_date(med["scadenza"])
+        days = (expiry - today).days
+        if days < 0:
+            status = f"Scaduto da {-days} giorni"
+        elif days <= 30:
+            status = f"Scade tra {days} giorni"
+        else:
+            status = f"Scadenza {expiry.strftime('%d/%m/%Y')}"
+
+        with st.container(border=True):
+            left, middle, right = st.columns([4, 2, 1])
+            with left:
+                st.subheader(med["nome"])
+                details = []
+                if med["principio_attivo"]:
+                    details.append(f"Principio attivo: {med['principio_attivo']}")
+                if med["aic"]:
+                    details.append(f"AIC: {med['aic']}")
+                if med["descrizione"]:
+                    details.append(med["descrizione"])
+                st.write("  \n".join(details) if details else "Nessun dettaglio aggiuntivo")
+                st.caption(status)
+
+            with middle:
+                qty = st.number_input(
+                    f"Quantità ({med['tipo']})",
+                    min_value=0,
+                    value=int(med["quantita"]),
+                    step=1,
+                    key=f"qty_{med['id']}",
+                )
+                if qty != med["quantita"]:
+                    if st.button("Salva quantità", key=f"save_{med['id']}"):
+                        update_quantity(med["id"], st.session_state.user_id, qty)
+                        st.rerun()
+
+            with right:
+                if st.button("Elimina", key=f"delete_{med['id']}", type="secondary"):
+                    delete_medicine(med["id"], st.session_state.user_id)
+                    st.rerun()
+
+
+def show_add():
+    st.title("Aggiungi farmaco")
+
+    st.subheader("Ricerca AIFA")
+    aic_search = st.text_input("Codice AIC", placeholder="Es. 012345678")
+    found = None
+    if aic_search:
+        found = find_aifa(aic_search)
+        if found:
+            st.success("Farmaco trovato nell'archivio AIFA.")
+            st.write(f"**{found['descrizione']}**")
+            if found["principio_attivo"]:
+                st.write(f"Principio attivo: {found['principio_attivo']}")
+            if found["ditta"]:
+                st.caption(f"Ditta: {found['ditta']}")
+        else:
+            st.warning("AIC non trovato nell'archivio caricato.")
+
+    with st.form("add_medicine_form"):
+        nome_default = found["descrizione"] if found else ""
+        principio_default = found["principio_attivo"] if found else ""
+        aic_default = found["aic"] if found else aic_search
+
+        nome = st.text_input("Nome farmaco", value=nome_default)
+        principio = st.text_input("Principio attivo", value=principio_default or "")
+        descrizione = st.text_area("Descrizione / note")
+        c1, c2 = st.columns(2)
+        quantita = c1.number_input("Quantità", min_value=0, value=1, step=1)
+        tipo = c2.selectbox("Unità", ["Pezzi", "Compresse", "Bustine", "Flaconi", "Altro"])
+        scadenza = st.date_input("Data di scadenza", min_value=date.today())
+        aic = st.text_input("AIC", value=aic_default or "")
+        submitted = st.form_submit_button("Salva farmaco", use_container_width=True)
+
+    if submitted:
+        if not nome.strip():
+            st.error("Inserisci il nome del farmaco.")
+        else:
+            add_medicine(
+                st.session_state.user_id,
+                nome,
+                descrizione,
+                principio,
+                quantita,
+                tipo,
+                scadenza,
+                aic,
+            )
+            st.success("Farmaco aggiunto.")
+            st.session_state.page = "I miei farmaci"
+            st.rerun()
+
+
+def show_aifa():
+    st.title("Archivio AIFA")
+    st.write(f"Record presenti: **{aifa_count():,}**".replace(",", "."))
+    st.caption("Carica il file confezioni.csv scaricato da AIFA. Il nuovo import sostituisce la cache precedente.")
+
+    uploaded = st.file_uploader("Carica confezioni.csv", type=["csv"])
+    if uploaded is not None and st.button("Importa archivio AIFA", type="primary"):
+        try:
+            with st.spinner("Importazione in corso..."):
+                count = import_aifa(uploaded)
+            st.success(f"Importati {count:,} farmaci.".replace(",", "."))
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Errore durante l'importazione: {exc}")
+
+    st.divider()
+    st.subheader("Verifica un AIC")
+    code = st.text_input("AIC da cercare", key="aifa_lookup")
+    if code:
+        row = find_aifa(code)
+        if row:
+            st.write(f"**{row['descrizione']}**")
+            st.write(f"Principio attivo: {row['principio_attivo'] or '—'}")
+            st.write(f"Ditta: {row['ditta'] or '—'}")
+        else:
+            st.info("Nessun risultato.")
+
+
+def show_export():
+    st.title("Esporta i miei farmaci")
+    medicines = list_medicines(st.session_state.user_id)
+    if not medicines:
+        st.info("Non ci sono farmaci da esportare.")
+        return
+
+    df = pd.DataFrame([dict(row) for row in medicines])
+    df = df.drop(columns=["user_id"], errors="ignore")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Scarica CSV",
+        data=df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="i_miei_farmaci.csv",
+        mime="text/csv",
+        use_container_width=True,
     )
 
 
-@app.route('/add', methods=['GET', 'POST'])
-@login_required
-def add():
-    if request.method == 'POST':
-        try:
-            nome = (request.form.get('nome') or '').strip()
-            descrizione = (request.form.get('descrizione') or '').strip()
-            principio_attivo = (request.form.get('principio_attivo') or '').strip()
-            qty = max(0, int(request.form.get('quantita') or 0))
-            tipo = (request.form.get('tipo') or 'Pezzi').strip()
-            aic = (request.form.get('aic') or '').strip()
+# -----------------------------
+# App
+# -----------------------------
+init_db()
 
-            scadenza_str = request.form.get('scadenza') or ''
-            year, month = map(int, scadenza_str.split('-'))
-            last_day = calendar.monthrange(year, month)[1]
-            scad_date = datetime(year, month, last_day).date()
+if "user_id" not in st.session_state:
+    show_login()
+    st.stop()
 
-            if not nome:
-                raise ValueError('Il nome del farmaco è obbligatorio')
+if "page" not in st.session_state:
+    st.session_state.page = "I miei farmaci"
 
-            nuovo = Farmaco(
-                nome=nome,
-                descrizione=descrizione,
-                principio_attivo=principio_attivo,
-                quantita=qty,
-                tipo=tipo,
-                scadenza=scad_date,
-                aic=aic,
-                user_id=current_user.id,
-            )
-            db.session.add(nuovo)
-            db.session.commit()
-            return redirect(url_for('dashboard'))
-        except Exception as e:
-            db.session.rollback()
-            flash(f'Errore dati: {e}')
-    return render_template('add.html')
+st.sidebar.title("I miei farmaci")
+st.sidebar.write(f"Accesso: **{st.session_state.username}**")
 
+pages = ["I miei farmaci", "Aggiungi farmaco", "Archivio AIFA", "Esporta"]
+selected = st.sidebar.radio(
+    "Menu",
+    pages,
+    index=pages.index(st.session_state.page) if st.session_state.page in pages else 0,
+)
+st.session_state.page = selected
 
-@app.route('/api/update_qty_direct', methods=['POST'])
-@login_required
-def update_qty_direct():
-    data = request.get_json(silent=True) or {}
-    farmaco = db.session.get(Farmaco, data.get('id')) if data.get('id') is not None else None
-    if farmaco and farmaco.user_id == current_user.id:
-        try:
-            farmaco.quantita = max(0, int(data.get('qty', 0)))
-            db.session.commit()
-            return jsonify({'success': True, 'qty': farmaco.quantita})
-        except (TypeError, ValueError):
-            db.session.rollback()
-    return jsonify({'success': False}), 400
+st.sidebar.divider()
+if st.sidebar.button("Esci", use_container_width=True):
+    logout()
 
-
-@app.route('/delete/<int:id>')
-@login_required
-def delete(id):
-    farmaco = db.session.get(Farmaco, id)
-    if not farmaco:
-        flash('Farmaco non trovato')
-    elif farmaco.user_id == current_user.id:
-        db.session.delete(farmaco)
-        db.session.commit()
-    return redirect(url_for('dashboard'))
-
-
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for('login'))
-
-
-@app.route('/update_aifa_db')
-@login_required
-def update_aifa_db():
-    file_path = os.path.join(basedir, 'confezioni.csv')
-    if not os.path.exists(file_path):
-        flash("File 'confezioni.csv' non trovato sul server")
-        return redirect(url_for('dashboard'))
-
-    try:
-        AifaCache.query.delete()
-        db.session.commit()
-
-        with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
-            csv_input = csv.DictReader(f, delimiter=';')
-            if not csv_input.fieldnames or 'codice_aic' not in csv_input.fieldnames:
-                f.seek(0)
-                csv_input = csv.DictReader(f, delimiter=',')
-
-            count = 0
-            batch = []
-            for row in csv_input:
-                raw_aic = (row.get('codice_aic') or '').strip()
-                if raw_aic.isdigit():
-                    raw_aic = raw_aic.zfill(9)
-
-                nome_commerciale = (row.get('denominazione') or '').strip()
-                desc_completa = f"{row.get('denominazione', '')} {row.get('descrizione', '')}".strip()
-                ditta = (row.get('ragione_sociale') or '').strip()
-                pa = (row.get('pa_associati') or row.get('principio_attivo') or '').strip()
-
-                if raw_aic and nome_commerciale:
-                    batch.append(AifaCache(
-                        aic=raw_aic,
-                        descrizione=desc_completa[:300],
-                        principio_attivo=pa[:300],
-                        ditta=ditta[:150],
-                    ))
-                    count += 1
-                    if len(batch) >= 1000:
-                        db.session.bulk_save_objects(batch)
-                        db.session.commit()
-                        batch = []
-            if batch:
-                db.session.bulk_save_objects(batch)
-                db.session.commit()
-
-        flash(f'Aggiornamento completato: importati {count} farmaci')
-    except Exception as e:
-        db.session.rollback()
-        flash(f'Errore tecnico durante l’aggiornamento AIFA: {e}')
-    return redirect(url_for('dashboard'))
-
-
-@app.route('/api/get_farmaco/<codice>')
-@login_required
-def api_get_farmaco(codice):
-    codice = codice.strip().upper()
-    if codice.startswith('A') and codice[1:].isdigit():
-        codice = codice[1:]
-
-    farmaco = AifaCache.query.filter_by(aic=codice).first()
-    if not farmaco and len(codice) == 8 and codice.isdigit():
-        farmaco = AifaCache.query.filter_by(aic='0' + codice).first()
-    if not farmaco and codice.startswith('0'):
-        farmaco = AifaCache.query.filter_by(aic=codice[1:]).first()
-
-    if farmaco:
-        return jsonify({
-            'success': True,
-            'aic': farmaco.aic,
-            'nome': farmaco.descrizione,
-            'principio_attivo': farmaco.principio_attivo,
-            'ditta': farmaco.ditta,
-        })
-    return jsonify({'success': False})
-
-
-with app.app_context():
-    db.create_all()
+if selected == "I miei farmaci":
+    show_dashboard()
+elif selected == "Aggiungi farmaco":
+    show_add()
+elif selected == "Archivio AIFA":
+    show_aifa()
+elif selected == "Esporta":
+    show_export()
