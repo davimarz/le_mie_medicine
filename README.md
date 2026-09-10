@@ -1,54 +1,67 @@
 # I miei farmaci
 
-Applicazione Streamlit per la gestione personale dei farmaci, delle quantità e delle scadenze, con ricerca tramite codice AIC e archivio AIFA.
+Web app Streamlit per gestire farmaci, quantità e scadenze, con autenticazione e database persistente su Supabase.
+
+## Architettura
+
+- **Streamlit**: interfaccia web
+- **Supabase Auth**: registrazione e accesso utenti
+- **Supabase PostgreSQL**: farmaci e archivio AIFA persistenti
+- **Row Level Security (RLS)**: ogni utente può leggere e modificare solo i propri dati
+
+Il progetto non usa più SQLite per i dati applicativi, quindi i dati non vengono persi quando Streamlit riavvia l'app.
+
+## Pubblicazione su Streamlit Community Cloud
+
+Usa questi parametri:
+
+- Repository: `davimarz/le_mie_medicine`
+- Branch: `main`
+- Main file path: `app.py`
+
+Le credenziali usate nel codice sono esclusivamente la URL pubblica del progetto Supabase e la **publishable key**. La sicurezza dei dati è gestita dalle policy RLS nel database. Non inserire mai nel repository una `service_role` key.
 
 ## Funzioni
 
-- registrazione e accesso utenti
-- password salvate con hash sicuro
-- compatibilità con i vecchi account Flask
-- gestione farmaci personali
+- registrazione account tramite email
+- login tramite email e password
+- gestione personale dei farmaci
 - quantità e scadenze
-- evidenza dei farmaci scaduti o in scadenza entro 30 giorni
-- ricerca tramite codice AIC
-- importazione del dataset AIFA `confezioni.csv`
+- segnalazione farmaci scaduti o in scadenza
+- ricerca per nome, principio attivo e AIC
+- caricamento di `confezioni.csv` AIFA associato al singolo account
 - esportazione dei propri farmaci in CSV
 
-## Avvio locale
+## Database Supabase
+
+Il progetto Supabase dedicato è `I miei farmaci` in regione `eu-central-1`.
+
+Tabelle principali:
+
+- `profiles`
+- `farmaci`
+- `aifa_cache`
+
+Tutte le tabelle applicative hanno Row Level Security attiva.
+
+## Installazione locale
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Pubblicazione su Streamlit Community Cloud
+Su Windows:
 
-1. Accedi a Streamlit Community Cloud con il tuo account GitHub.
-2. Crea una nuova app.
-3. Seleziona il repository `davimarz/le_mie_medicine`.
-4. Seleziona il branch `main`.
-5. Imposta `app.py` come Main file path.
-6. Avvia il deployment.
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-Non è necessaria una `SECRET_KEY`: l'accesso utente usa la sessione Streamlit e le password vengono archiviate con hash.
+## File esclusi da Git
 
-## Archivio AIFA
-
-`confezioni.csv` non viene inserito nel repository. Dopo l'accesso apri **Archivio AIFA** e carica il CSV dalla pagina dell'app. L'importazione popola la tabella `aifa_cache`.
-
-## Database
-
-Per mantenere compatibilità con la versione precedente l'app utilizza SQLite e il file `farmaci.db`. Il file è escluso da GitHub perché può contenere dati personali.
-
-### Nota importante per Streamlit Community Cloud
-
-Il filesystem di un'app cloud non deve essere considerato un archivio permanente. SQLite va bene per prove e uso locale, ma per un'app pubblica con utenti reali è consigliato collegare un database persistente esterno, ad esempio PostgreSQL/Supabase.
-
-## File esclusi da GitHub
-
-- `farmaci.db`
-- `utenti_registrati.csv`
-- `confezioni.csv`
-- `.env` e altri file con segreti
-
-Il progetto non usa più Flask, i template HTML o il foglio CSS della vecchia versione: l'interfaccia è interamente gestita da Streamlit.
+Il `.gitignore` continua a escludere vecchi database locali, file CSV con dati utenti, `.env`, ambienti virtuali e file temporanei.
