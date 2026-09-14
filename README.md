@@ -37,7 +37,7 @@ Per i collegamenti di accesso configura inoltre:
 2. lo stesso indirizzo come **Site URL** e **Redirect URL** in Supabase Auth;
 3. il template **Magic Link** con un link nel formato `{{ .SiteURL }}?token_hash={{ .TokenHash }}&type=email`.
 
-Il catalogo viene alimentato con l'[Anagrafica Farmaci AIFA](https://www.aifa.gov.it/liste-dei-farmaci). Il barcode non è garantito per ogni record: quando manca la corrispondenza, l'utente può inserire l'AIC riportato sulla confezione o completare i campi manualmente.
+L'amministratore può aggiornare il catalogo direttamente dall'[Anagrafica Farmaci AIFA](https://www.aifa.gov.it/liste-dei-farmaci), oppure caricare il CSV ufficiale manualmente. Il barcode non è garantito per ogni record: quando manca la corrispondenza, l'utente può inserire l'AIC riportato sulla confezione o completare i campi manualmente.
 
 ## Database
 
