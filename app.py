@@ -89,13 +89,15 @@ def form_data(prefix, defaults):
             "aic": defaults.get("aic"), "barcode": defaults.get("barcode"),
             "low_stock": low_stock, "reminder_days": reminder}
 
-def apply_scan(service, token, code):
-    ok, found = call(service.lookup, token, code)
+def apply_scan(service, token, codes):
+    values = list(codes) if isinstance(codes, (list, tuple)) else [codes]
+    ok, result = call(service.lookup_any, token, values)
     if ok:
-        st.session_state.scan_code = code
+        matched_code, found = result
+        st.session_state.scan_code = matched_code
         st.session_state.scan_result = found or {}
         st.session_state.form_epoch = st.session_state.get("form_epoch", 0) + 1
-        st.session_state.scan_message = "Farmaco riconosciuto." if found else "Codice non presente nel catalogo: completa i campi."
+        st.session_state.scan_message = "Farmaco riconosciuto dal codice AIC." if found else "Nessun codice presente nel catalogo: completa i campi."
         st.rerun()
 
 def editor(service, token, current=None):
@@ -112,7 +114,7 @@ def editor(service, token, current=None):
                     codes = decode_codes(raw)
                     if not codes:
                         raise AppError("Codice non leggibile. Evita riflessi e riprova.")
-                    apply_scan(service, token, codes[0])
+                    apply_scan(service, token, codes)
                 except AppError as error:
                     st.warning(str(error))
         manual = st.text_input("Oppure inserisci AIC/EAN")
