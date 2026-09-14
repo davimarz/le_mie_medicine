@@ -2,3 +2,5 @@ streamlit==1.49.1
 supabase==2.18.1
 pandas==2.2.3
 reportlab==4.4.3
+Pillow==11.3.0
+zxing-cpp==2.3.0
