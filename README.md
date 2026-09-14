@@ -1,67 +1,51 @@
-# I miei farmaci
+# Le mie medicine
 
-Web app Streamlit per gestire farmaci, quantità e scadenze, con autenticazione e database persistente su Supabase.
+App Streamlit per inventario personale, scorte, scadenze e registrazione delle indicazioni ricevute da medico o farmacista. Autenticazione, database, RLS e Storage sono gestiti da Supabase.
 
-## Architettura
-
-- **Streamlit**: interfaccia web
-- **Supabase Auth**: registrazione e accesso utenti
-- **Supabase PostgreSQL**: farmaci e archivio AIFA persistenti
-- **Row Level Security (RLS)**: ogni utente può leggere e modificare solo i propri dati
-
-Il progetto non usa più SQLite per i dati applicativi, quindi i dati non vengono persi quando Streamlit riavvia l'app.
-
-## Pubblicazione su Streamlit Community Cloud
-
-Usa questi parametri:
-
-- Repository: `davimarz/le_mie_medicine`
-- Branch: `main`
-- Main file path: `app.py`
-
-Le credenziali usate nel codice sono esclusivamente la URL pubblica del progetto Supabase e la **publishable key**. La sicurezza dei dati è gestita dalle policy RLS nel database. Non inserire mai nel repository una `service_role` key.
+> L'app è uno strumento organizzativo: non formula diagnosi, non prescrive farmaci e non modifica dosaggi.
 
 ## Funzioni
 
-- registrazione account tramite email
-- login tramite email e password
-- gestione personale dei farmaci
-- quantità e scadenze
-- segnalazione farmaci scaduti o in scadenza
-- ricerca per nome, principio attivo e AIC
-- caricamento di `confezioni.csv` AIFA associato al singolo account
-- esportazione dei propri farmaci in CSV
+- registrazione, login, recupero e cambio password;
+- sessioni con persistenza dei token ruotati;
+- inserimento e modifica completa dei farmaci;
+- scorte minime, scadenze e promemoria in-app;
+- cestino recuperabile e registro delle attività;
+- piano di assunzione trascritto dall'utente;
+- ricerca tramite AIC o barcode/EAN, compatibile con lettori USB;
+- catalogo AIFA condiviso con aggiornamento amministrativo atomico;
+- fotografie private delle confezioni;
+- caregiver in sola lettura con accesso revocabile;
+- esportazione CSV, JSON, PDF e calendario ICS;
+- importazione backup JSON ed eliminazione completa dell'account.
 
-## Database Supabase
-
-Il progetto Supabase dedicato è `I miei farmaci` in regione `eu-central-1`.
-
-Tabelle principali:
-
-- `profiles`
-- `farmaci`
-- `aifa_cache`
-
-Tutte le tabelle applicative hanno Row Level Security attiva.
-
-## Installazione locale
+## Installazione
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 streamlit run app.py
 ```
 
-Su Windows:
+Configura `SUPABASE_URL` e `SUPABASE_PUBLISHABLE_KEY` tramite Streamlit Secrets o variabili d'ambiente. Non usare mai una secret/service-role key nel client.
 
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-streamlit run app.py
+## Database
+
+Le migrazioni versionate sono in `supabase/migrations`. Tutte le tabelle esposte hanno RLS. Le funzioni privilegiate verificano `auth.uid()` o il ruolo amministrativo e negano l'esecuzione ad `anon`.
+
+Per rendere un utente amministratore del catalogo AIFA, assegna `app_metadata.role = admin` tramite un ambiente server-side sicuro. Non usare `user_metadata` per autorizzazioni.
+
+## Test
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
 ```
 
-## File esclusi da Git
+GitHub Actions esegue compilazione, test e controllo delle dipendenze a ogni push e pull request.
 
-Il `.gitignore` continua a escludere vecchi database locali, file CSV con dati utenti, `.env`, ambienti virtuali e file temporanei.
+## Privacy
+
+Consulta [PRIVACY.md](PRIVACY.md). Prima dell'uso pubblico, completa l'informativa con i dati reali del titolare e verifica gli obblighi applicabili al trattamento di dati sanitari.
