@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from aifa_catalog import download_official_catalog
 from barcode_scanner import decode_codes
 from data_access import MedicineRepository
 from medicine_core import EMAIL_RE, expiry_status, medicines_to_ics, normalize_aic, parse_aifa_csv, parse_date, reminders, validate_password
@@ -285,6 +286,18 @@ def data_page(repo):
 def catalog(repo):
     st.title("Catalogo AIFA condiviso"); st.write(f"Record: **{repo.catalog_count():,}**".replace(",","."))
     if st.session_state.get("app_metadata",{}).get("role")!="admin": st.info("Il catalogo è aggiornato centralmente dagli amministratori."); return
+    st.caption("Fonte ufficiale: Anagrafica Farmaci AIFA, aggiornata al giorno precedente.")
+    confirm_download = st.checkbox("Confermo l'aggiornamento dal portale AIFA")
+    if st.button("Scarica e aggiorna da AIFA", type="primary", disabled=not confirm_download):
+        try:
+            with st.spinner("Download e validazione del catalogo AIFA…"):
+                rows = download_official_catalog()
+                repo.import_catalog(rows)
+            st.success(f"Catalogo aggiornato: {len(rows):,} confezioni.")
+            st.rerun()
+        except Exception: safe_error("Aggiornamento AIFA non riuscito")
+    st.divider()
+    st.caption("In alternativa puoi caricare manualmente il CSV ufficiale.")
     upload=st.file_uploader("CSV AIFA",type=["csv"]); confirm=st.checkbox("Confermo la sostituzione atomica")
     if upload and st.button("Aggiorna catalogo",disabled=not confirm):
         try: rows=parse_aifa_csv(upload.getvalue()); repo.import_catalog(rows); st.success(f"Importati {len(rows):,} record.")
