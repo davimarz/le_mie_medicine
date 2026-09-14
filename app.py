@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client
 
+from barcode_scanner import decode_codes
 from data_access import MedicineRepository
 from medicine_core import EMAIL_RE, expiry_status, medicines_to_ics, normalize_aic, parse_aifa_csv, parse_date, reminders, validate_password
 from pdf_report import build_inventory_pdf
@@ -92,64 +93,57 @@ def safe_error(label):
     st.error(f"{label}. Riprova; se il problema continua contatta l'assistenza.")
 
 
+def consume_email_link():
+    """Exchange the token hash from a Supabase email link for a session."""
+    token_hash = st.query_params.get("token_hash")
+    if not token_hash:
+        return False
+    try:
+        response = client().auth.verify_otp({
+            "token_hash": token_hash,
+            "type": st.query_params.get("type", "email"),
+        })
+        remember(response.session)
+        st.query_params.clear()
+        st.success("Email verificata. Accesso effettuato.")
+        return True
+    except Exception:
+        st.query_params.clear()
+        st.error("Il collegamento non è valido o è scaduto. Richiedine uno nuovo.")
+        return False
+
+
 def login_page():
     page_title("Le mie medicine", "Inventario personale di farmaci, scorte e scadenze")
     st.info("Strumento organizzativo: non sostituisce medico, farmacista o prescrizione.")
-    access, register, reset = st.tabs(["Accedi", "Registrati", "Password dimenticata"])
+    access, register = st.tabs(["Ricevi il link", "Registrati"])
     with access:
-        with st.form("login"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            submit = st.form_submit_button("Accedi", use_container_width=True)
+        st.write("Inserisci la tua email: riceverai un collegamento univoco per entrare senza password.")
+        with st.form("magic_link"):
+            email = st.text_input("Email", autocomplete="email")
+            submit = st.form_submit_button("Invia collegamento", use_container_width=True)
         if submit:
             try:
-                remember(client().auth.sign_in_with_password({"email": email.strip().lower(), "password": password}).session)
-                st.rerun()
+                client().auth.sign_in_with_otp({"email": email.strip().lower(), "options": {"email_redirect_to": setting("APP_URL")}})
+                st.success("Controlla la posta e apri il collegamento da questo dispositivo.")
             except Exception:
-                st.error("Email o password non validi.")
+                safe_error("Invio non riuscito")
     with register:
         with st.expander("Leggi l'informativa privacy"):
             st.markdown(Path("PRIVACY.md").read_text(encoding="utf-8"))
         with st.form("register"):
             username = st.text_input("Nome visualizzato")
             email = st.text_input("Email", key="reg_email")
-            password = st.text_input("Password", type="password", key="reg_password")
-            confirm = st.text_input("Conferma password", type="password")
             privacy = st.checkbox("Confermo di aver letto l'informativa privacy")
-            submit = st.form_submit_button("Crea account", use_container_width=True)
+            submit = st.form_submit_button("Registrati e ricevi il link", use_container_width=True)
         if submit:
-            errors = validate_password(password)
             if not username.strip() or not EMAIL_RE.match(email.strip()): st.error("Nome o email non validi.")
-            elif errors: st.error("Password: " + ", ".join(errors) + ".")
-            elif password != confirm: st.error("Le password non coincidono.")
             elif not privacy: st.error("Leggi e conferma l'informativa privacy.")
             else:
                 try:
-                    response = client().auth.sign_up({"email": email.strip().lower(), "password": password, "options": {"data": {"username": username.strip(), "privacy_accepted_at": date.today().isoformat()}}})
-                    if response.session: remember(response.session); st.rerun()
-                    st.success("Controlla l'email per confermare la registrazione.")
+                    client().auth.sign_in_with_otp({"email": email.strip().lower(), "options": {"should_create_user": True, "email_redirect_to": setting("APP_URL"), "data": {"username": username.strip(), "privacy_accepted_at": date.today().isoformat()}}})
+                    st.success("Registrazione completata: controlla l'email e apri il collegamento di attivazione.")
                 except Exception: safe_error("Registrazione non riuscita")
-    with reset:
-        st.caption("Richiedi un codice di recupero, poi inseriscilo qui insieme alla nuova password.")
-        email = st.text_input("Email dell'account", key="reset_email")
-        if st.button("Invia codice di recupero", use_container_width=True):
-            try: client().auth.reset_password_email(email.strip().lower(), {"redirect_to": setting("APP_URL", "http://localhost:8501")}); st.success("Se l'indirizzo è registrato riceverai un'email.")
-            except Exception: safe_error("Invio non riuscito")
-        with st.form("complete_recovery"):
-            code = st.text_input("Codice ricevuto")
-            new_password = st.text_input("Nuova password", type="password")
-            complete = st.form_submit_button("Imposta nuova password", use_container_width=True)
-        if complete:
-            errors = validate_password(new_password)
-            if errors: st.error("Password: " + ", ".join(errors) + ".")
-            else:
-                try:
-                    response = client().auth.verify_otp({"email": email.strip().lower(), "token": code.strip(), "type": "recovery"})
-                    remember(response.session)
-                    client().auth.update_user({"password": new_password})
-                    st.success("Password aggiornata. Ora puoi accedere.")
-                    clear_session()
-                except Exception: safe_error("Codice non valido o scaduto")
 
 
 def form_values(prefix, d):
@@ -199,12 +193,33 @@ def dashboard(repo):
 def editor(repo):
     meds = repo.owned_medicines(); edit_id = st.session_state.get("edit_id"); current = next((m for m in meds if m["id"] == edit_id), None)
     page_title("Modifica farmaco" if current else "Aggiungi farmaco", "Registra confezione, scorta, scadenza e indicazioni prescritte")
-    lookup = st.text_input("Cerca nel catalogo tramite AIC o barcode")
+    st.subheader("1. Scansiona la confezione")
+    camera = st.camera_input("Inquadra QR, Data Matrix o codice a barre", key="package_camera")
+    scanned = None
+    if camera:
+        try:
+            codes = decode_codes(camera.getvalue())
+            if codes:
+                scanned = codes[0]
+                st.success(f"Codice rilevato: {scanned}")
+            else:
+                st.warning("Codice non leggibile. Avvicina la confezione, evita riflessi e riprova.")
+        except Exception:
+            safe_error("Lettura del codice non riuscita")
+    lookup = st.text_input("Oppure inserisci AIC/EAN manualmente", value=scanned or st.session_state.get("last_scanned_code", ""))
+    if scanned:
+        st.session_state.last_scanned_code = scanned
     found = None
     if lookup:
         try: found = repo.catalog_lookup(lookup)
         except Exception: safe_error("Catalogo non disponibile")
     defaults = current or ({"nome": (found or {}).get("descrizione", ""), "principio_attivo": (found or {}).get("principio_attivo", ""), "aic": (found or {}).get("aic", ""), "barcode": (found or {}).get("barcode", ""), "quantita": 1} if found else {"quantita": 1})
+    if found:
+        st.subheader("2. Farmaco riconosciuto")
+        st.info(f"{found.get('descrizione')}\n\nPrincipio attivo: {found.get('principio_attivo') or 'non indicato'} · AIC {found.get('aic')}")
+    elif lookup:
+        st.warning("Codice non presente nel catalogo AIFA. Puoi completare i dati manualmente.")
+    st.subheader("3. Quantità e scadenza")
     with st.form(f"medicine_{edit_id or 'new'}"):
         payload = form_values(str(edit_id or "new"), defaults); photo = st.file_uploader("Foto confezione (massimo 5 MB)", type=["jpg", "jpeg", "png", "webp"]); save = st.form_submit_button("Salva", type="primary", use_container_width=True)
     if save:
@@ -293,6 +308,7 @@ def account(repo):
         except Exception: safe_error("Eliminazione non riuscita")
 
 
+consume_email_link()
 if not restore_session(): login_page(); st.stop()
 repo=MedicineRepository(client(),st.session_state.user_id)
 pages={"I miei farmaci":dashboard,"Aggiungi o modifica":editor,"Piano di assunzione":treatments,"Cestino":trash,"Caregiver":caregivers,"Catalogo AIFA":catalog,"Dati e calendario":data_page,"Account e privacy":account}
