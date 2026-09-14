@@ -1,9 +1,21 @@
 # Informativa privacy essenziale
 
-L'app conserva i dati inseriti dall'utente per fornire inventario, scadenze, scorte, piani di assunzione e condivisione caregiver. Queste informazioni possono rivelare dati relativi alla salute.
+**Da completare prima della pubblicazione pubblica.**
 
-L'utente può esportare i propri dati dalla pagina **Dati e calendario** ed eliminare account e dati dalla pagina **Account e privacy**. L'accesso caregiver è volontario e revocabile.
+L'app conserva email, nome, sessioni di accesso e i dati sulle medicine inseriti dall'utente per offrire inventario, scadenze, scorte ed esportazioni. Le informazioni sulle medicine possono rivelare dati relativi alla salute.
 
-Prima di una pubblicazione destinata a terzi, il titolare del trattamento deve completare questa informativa con identità e contatti, base giuridica, tempi di conservazione, responsabili/sub-responsabili, trasferimenti, diritti dell'interessato e recapito per esercitarli.
+I dati applicativi sono conservati nel database Turso configurato dal titolare. Streamlit Community Cloud ospita l'interfaccia; il servizio email configurato dal titolare invia i collegamenti personali di accesso. Non vengono usati Supabase né cookie pubblicitari.
 
-L'app è uno strumento organizzativo e non fornisce diagnosi, prescrizioni, modifiche del dosaggio o verifiche cliniche delle interazioni.
+L'utente può esportare i dati dalla pagina **Dati**; dalla pagina **Account** può revocare il collegamento personale, chiudere tutte le sessioni ed eliminare definitivamente account e medicine.
+
+Il titolare deve indicare qui, prima dell'uso da parte di terzi:
+
+- identità e contatti del titolare;
+- finalità e base giuridica del trattamento;
+- tempi di conservazione;
+- responsabili e sub-responsabili, inclusi Streamlit, Turso e provider email;
+- eventuali trasferimenti fuori dallo SEE e relative garanzie;
+- diritti dell'interessato e contatto per esercitarli;
+- misure e procedura per incidenti e richieste di cancellazione.
+
+L'app è uno strumento organizzativo e non fornisce diagnosi, prescrizioni, modifiche del dosaggio o verifiche cliniche.

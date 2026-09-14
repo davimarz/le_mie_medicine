@@ -13,6 +13,7 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements-dev.txt
-      - run: python -m compileall app.py data_access.py medicine_core.py pdf_report.py
+      - run: python -m compileall app.py aifa_catalog.py barcode_scanner.py database.py medicine_core.py medicine_service.py pdf_report.py
       - run: python -m pytest -q
       - run: pip check
+      - run: pip-audit
