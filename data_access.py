@@ -21,6 +21,9 @@ class MedicineRepository:
             query = query.is_("deleted_at", "null")
         return query.execute().data or []
 
+    def owned_medicines(self, include_deleted=False):
+        return [row for row in self.medicines(include_deleted) if row.get("user_id") == self.user_id]
+
     def create_medicine(self, payload: dict):
         payload = {**payload, "user_id": self.user_id}
         return self.sb.table("farmaci").insert(payload).execute().data
