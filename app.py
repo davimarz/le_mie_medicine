@@ -1,424 +1,305 @@
-import csv
-import io
-from datetime import date, datetime, timedelta
-
+import hashlib
+from datetime import date, datetime
 import pandas as pd
 import streamlit as st
-from supabase import create_client
 
-SUPABASE_URL = "https://maiildnzyocmdjnodofh.supabase.co"
-SUPABASE_KEY = "sb_publishable_O_ey2wT14cC-RHQdgv6_uA_ql9980Q9"
+from aifa_catalog import download_official_catalog
+from barcode_scanner import decode_codes
+from database import Database, StorageError
+from medicine_core import medicines_to_ics
+from medicine_service import AppError, MedicineService
+from pdf_report import build_inventory_pdf
 
-st.set_page_config(
-    page_title="I miei farmaci",
-    page_icon="💊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Le mie medicine", page_icon="💊", layout="wide")
+st.markdown("""<style>
+:root{--brand:#087ea4;--ink:#17324d;--line:#d9e8ef}
+.stApp{background:linear-gradient(180deg,#f4fbfd,#fff 320px);color:var(--ink)}
+[data-testid="stSidebar"]{background:#eef8fb;border-right:1px solid var(--line)}
+[data-testid="stVerticalBlockBorderWrapper"]{background:#fff;border-radius:18px!important;box-shadow:0 8px 24px #17324d0d}
+.hero{padding:22px 24px;border-radius:22px;background:linear-gradient(135deg,#087ea4,#14a3b8);color:#fff;margin-bottom:20px}
+.hero h1{margin:0;color:#fff}.hero p{margin:.4rem 0 0}
+.stButton>button,.stDownloadButton>button{border-radius:12px;min-height:44px;font-weight:650}
+.badge{display:inline-block;border-radius:999px;padding:5px 10px;font-weight:700;margin-bottom:8px}
+.danger{background:#ffe5e5;color:#8b0000}.warning{background:#fff2cc;color:#624900}.ok{background:#dff5e5;color:#14532d}
+@media(max-width:640px){.block-container{padding:1rem .8rem 5rem}.hero{padding:18px}.stButton>button{width:100%}}
+</style>""", unsafe_allow_html=True)
 
+def hero(title, text):
+    st.markdown(f'<section class="hero"><h1>{title}</h1><p>{text}</p></section>', unsafe_allow_html=True)
 
-def client(authed=True):
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-    if authed and st.session_state.get("access_token") and st.session_state.get("refresh_token"):
-        sb.auth.set_session(st.session_state.access_token, st.session_state.refresh_token)
-    return sb
-
-
-def remember_session(session):
-    st.session_state.access_token = session.access_token
-    st.session_state.refresh_token = session.refresh_token
-    st.session_state.user_id = session.user.id
-    st.session_state.email = session.user.email
-
-
-def clear_session():
-    for key in ("access_token", "refresh_token", "user_id", "email", "username", "page"):
-        st.session_state.pop(key, None)
-
-
-def restore_session():
-    if not st.session_state.get("access_token") or not st.session_state.get("refresh_token"):
-        return False
+def call(function, *args):
     try:
-        result = client().auth.get_user()
-        if not result or not result.user:
-            clear_session()
-            return False
-        st.session_state.user_id = result.user.id
-        st.session_state.email = result.user.email
-        profile = client().table("profiles").select("username").eq("id", result.user.id).maybe_single().execute()
-        if profile.data:
-            st.session_state.username = profile.data.get("username")
-        return True
+        return True, function(*args)
+    except (AppError, StorageError) as error:
+        st.error(str(error))
     except Exception:
-        clear_session()
-        return False
+        st.error("Operazione temporaneamente non disponibile.")
+    return False, None
 
-
-def login(email, password):
-    try:
-        response = client(False).auth.sign_in_with_password({"email": email.strip().lower(), "password": password})
-        remember_session(response.session)
-        profile = client().table("profiles").select("username").eq("id", response.user.id).maybe_single().execute()
-        st.session_state.username = (profile.data or {}).get("username") or email.split("@", 1)[0]
-        return True, "Accesso effettuato."
-    except Exception as exc:
-        return False, f"Accesso non riuscito: {exc}"
-
-
-def register(username, email, password):
-    username = username.strip()
-    email = email.strip().lower()
-    if not username or not email or not password:
-        return False, "Compila tutti i campi."
-    if len(password) < 6:
-        return False, "La password deve contenere almeno 6 caratteri."
-    try:
-        response = client(False).auth.sign_up(
-            {
-                "email": email,
-                "password": password,
-                "options": {"data": {"username": username}},
-            }
-        )
-        if response.session:
-            remember_session(response.session)
-            st.session_state.username = username
-            return True, "Account creato e accesso effettuato."
-        return True, "Account creato. Controlla l'email per confermare la registrazione, poi accedi."
-    except Exception as exc:
-        return False, f"Registrazione non riuscita: {exc}"
-
-
-def logout():
-    try:
-        client().auth.sign_out()
-    except Exception:
-        pass
-    clear_session()
+def go(page):
+    st.session_state.page = page
     st.rerun()
 
-
-def list_medicines():
-    response = (
-        client()
-        .table("farmaci")
-        .select("id,nome,descrizione,principio_attivo,quantita,tipo,scadenza,aic,created_at")
-        .order("nome")
-        .execute()
-    )
-    return response.data or []
-
-
-def add_medicine(nome, descrizione, principio_attivo, quantita, tipo, scadenza, aic):
-    payload = {
-        "user_id": st.session_state.user_id,
-        "nome": nome.strip(),
-        "descrizione": descrizione.strip() or None,
-        "principio_attivo": principio_attivo.strip() or None,
-        "quantita": int(quantita),
-        "tipo": tipo,
-        "scadenza": scadenza.isoformat(),
-        "aic": aic.strip() or None,
-    }
-    client().table("farmaci").insert(payload).execute()
-
-
-def update_quantity(medicine_id, quantity):
-    client().table("farmaci").update({"quantita": int(quantity)}).eq("id", medicine_id).execute()
-
-
-def delete_medicine(medicine_id):
-    client().table("farmaci").delete().eq("id", medicine_id).execute()
-
-
-def find_aifa(aic):
-    code = (aic or "").strip().upper()
-    if code.startswith("A") and code[1:].isdigit():
-        code = code[1:]
-    candidates = [code]
-    if code.isdigit():
-        candidates.append(code.zfill(9))
-        if code.startswith("0"):
-            candidates.append(code[1:])
-    for candidate in dict.fromkeys(candidates):
-        result = (
-            client()
-            .table("aifa_cache")
-            .select("aic,descrizione,principio_attivo,ditta")
-            .eq("aic", candidate)
-            .maybe_single()
-            .execute()
-        )
-        if result.data:
-            return result.data
-    return None
-
-
-def aifa_count():
-    result = client().table("aifa_cache").select("aic", count="exact").limit(1).execute()
-    return result.count or 0
-
-
-def import_aifa(uploaded_file):
-    raw = uploaded_file.getvalue()
-    text = None
-    for encoding in ("utf-8-sig", "latin-1"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    if text is None:
-        raise ValueError("Codifica del CSV non riconosciuta.")
-
-    delimiter = ";" if text[:5000].count(";") >= text[:5000].count(",") else ","
-    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
-    if not reader.fieldnames:
-        raise ValueError("CSV senza intestazioni.")
-
-    rows = []
-    for row in reader:
-        raw_aic = (row.get("codice_aic") or "").strip()
-        if raw_aic.isdigit():
-            raw_aic = raw_aic.zfill(9)
-        denominazione = (row.get("denominazione") or "").strip()
-        descrizione = (row.get("descrizione") or "").strip()
-        ditta = (row.get("ragione_sociale") or "").strip()
-        principio = (row.get("pa_associati") or row.get("principio_attivo") or "").strip()
-        if raw_aic and denominazione:
-            rows.append(
-                {
-                    "user_id": st.session_state.user_id,
-                    "aic": raw_aic,
-                    "descrizione": f"{denominazione} {descrizione}".strip()[:300],
-                    "principio_attivo": principio[:300] or None,
-                    "ditta": ditta[:150] or None,
-                }
-            )
-
-    sb = client()
-    sb.table("aifa_cache").delete().eq("user_id", st.session_state.user_id).execute()
-    batch_size = 500
-    for start in range(0, len(rows), batch_size):
-        sb.table("aifa_cache").upsert(rows[start : start + batch_size], on_conflict="user_id,aic").execute()
-    return len(rows)
-
-
-def parse_date(value):
-    if isinstance(value, date):
-        return value
-    try:
-        return datetime.strptime(str(value), "%Y-%m-%d").date()
-    except Exception:
-        return date.today()
-
-
-def show_login():
-    st.title("I miei farmaci")
-    st.caption("Gestione personale di farmaci, quantità e scadenze")
-    login_tab, register_tab = st.tabs(["Accedi", "Registrati"])
-
-    with login_tab:
-        with st.form("login_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Accedi", use_container_width=True)
-        if submitted:
-            ok, message = login(email, password)
+def auth_page(service):
+    hero("Le mie medicine", "Scansiona la confezione, indica quantità e scadenza")
+    st.info("Strumento organizzativo: non sostituisce medico, farmacista o prescrizione.")
+    access, register = st.tabs(["Ricevi il link", "Registrati"])
+    with access:
+        with st.form("access"):
+            email = st.text_input("Email", autocomplete="email")
+            submit = st.form_submit_button("Invia collegamento personale", type="primary", use_container_width=True)
+        if submit:
+            ok, _ = call(service.request_access, email)
             if ok:
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
+                st.success("Controlla la posta. Per un'ora funziona anche il link precedente.")
+    with register:
+        with st.expander("Leggi l'informativa privacy"):
+            try:
+                st.markdown(open("PRIVACY.md", encoding="utf-8").read())
+            except OSError:
+                st.warning("Informativa non disponibile.")
+        with st.form("register"):
+            name = st.text_input("Nome")
+            email = st.text_input("Email", key="registration_email")
+            privacy = st.checkbox("Confermo di aver letto e accettato l'informativa")
+            submit = st.form_submit_button("Registrati e ricevi il link", type="primary", use_container_width=True)
+        if submit:
+            ok, _ = call(service.request_access, email, name, privacy)
+            if ok:
+                st.success("Registrazione completata. Apri il collegamento ricevuto via email.")
 
-    with register_tab:
-        with st.form("register_form"):
-            username = st.text_input("Nome utente")
-            email = st.text_input("Email", key="reg_email")
-            password = st.text_input("Password", type="password", key="reg_password")
-            confirm = st.text_input("Conferma password", type="password")
-            submitted = st.form_submit_button("Crea account", use_container_width=True)
-        if submitted:
-            if password != confirm:
-                st.error("Le password non coincidono.")
-            else:
-                ok, message = register(username, email, password)
-                if ok:
-                    st.success(message)
-                    if st.session_state.get("user_id"):
-                        st.rerun()
-                else:
-                    st.error(message)
+def form_data(prefix, defaults):
+    name = st.text_input("Farmaco", value=defaults.get("name") or "", key=prefix + "name")
+    c1, c2 = st.columns(2)
+    quantity = c1.number_input("Quantità", min_value=0, value=int(defaults.get("quantity", 1)), key=prefix + "quantity")
+    raw = defaults.get("expiry")
+    expiry = c2.date_input("Scadenza", value=date.fromisoformat(raw) if raw else date.today(), key=prefix + "expiry")
+    with st.expander("Dettagli e promemoria"):
+        active = st.text_input("Principio attivo", value=defaults.get("active_ingredient") or "", key=prefix + "active")
+        description = st.text_area("Descrizione", value=defaults.get("description") or "", key=prefix + "description")
+        company = st.text_input("Ditta", value=defaults.get("company") or "", key=prefix + "company")
+        c3, c4, c5 = st.columns(3)
+        units = ["Pezzi", "Compresse", "Bustine", "Flaconi", "Altro"]
+        unit0 = defaults.get("unit") or "Pezzi"
+        unit = c3.selectbox("Unità", units, index=units.index(unit0) if unit0 in units else 0, key=prefix + "unit")
+        low_stock = c4.number_input("Avvisa sotto", min_value=0, value=int(defaults.get("low_stock", 1)), key=prefix + "low")
+        reminder = c5.number_input("Preavviso scadenza (giorni)", 1, 365, int(defaults.get("reminder_days", 30)), key=prefix + "reminder")
+    return {"name": name, "active_ingredient": active, "description": description, "company": company,
+            "quantity": quantity, "unit": unit, "expiry": expiry.isoformat(),
+            "aic": defaults.get("aic"), "barcode": defaults.get("barcode"),
+            "low_stock": low_stock, "reminder_days": reminder}
 
+def apply_scan(service, token, code):
+    ok, found = call(service.lookup, token, code)
+    if ok:
+        st.session_state.scan_code = code
+        st.session_state.scan_result = found or {}
+        st.session_state.form_epoch = st.session_state.get("form_epoch", 0) + 1
+        st.session_state.scan_message = "Farmaco riconosciuto." if found else "Codice non presente nel catalogo: completa i campi."
+        st.rerun()
 
-def show_dashboard():
-    medicines = list_medicines()
-    today = date.today()
-    expired = sum(parse_date(m["scadenza"]) < today for m in medicines)
-    expiring = sum(today <= parse_date(m["scadenza"]) <= today + timedelta(days=30) for m in medicines)
+def editor(service, token, current=None):
+    hero("Modifica farmaco" if current else "Aggiungi una medicina",
+         "Scansiona la confezione: poi bastano quantità e scadenza")
+    if not current:
+        camera = st.camera_input("Inquadra QR, Data Matrix o codice a barre")
+        if camera:
+            raw = camera.getvalue()
+            fingerprint = hashlib.sha256(raw).hexdigest()
+            if st.session_state.get("last_scan") != fingerprint:
+                st.session_state.last_scan = fingerprint
+                try:
+                    codes = decode_codes(raw)
+                    if not codes:
+                        raise AppError("Codice non leggibile. Evita riflessi e riprova.")
+                    apply_scan(service, token, codes[0])
+                except AppError as error:
+                    st.warning(str(error))
+        manual = st.text_input("Oppure inserisci AIC/EAN")
+        if st.button("Cerca AIC/EAN", disabled=not manual, use_container_width=True):
+            apply_scan(service, token, manual)
+    message = st.session_state.pop("scan_message", None)
+    if message:
+        st.success(message) if st.session_state.get("scan_result") else st.warning(message)
+    found = st.session_state.get("scan_result", {}) if not current else {}
+    defaults = current or {"name": found.get("description", ""), "description": found.get("description", ""),
+        "active_ingredient": found.get("active_ingredient", ""), "company": found.get("company", ""),
+        "aic": found.get("aic"), "barcode": found.get("barcode") or st.session_state.get("scan_code"), "quantity": 1}
+    if found:
+        st.info(f"**{found.get('description')}**\n\n{found.get('active_ingredient') or 'Principio attivo non indicato'} · AIC {found.get('aic')}")
+    epoch = st.session_state.get("form_epoch", 0)
+    prefix = f"med_{(current or {}).get('id', 'new')}_{epoch}_"
+    with st.form(prefix):
+        data = form_data(prefix, defaults)
+        save = st.form_submit_button("Salva medicina", type="primary", use_container_width=True)
+    if save:
+        ok, _ = call(service.save, token, data, (current or {}).get("id"))
+        if ok:
+            for key in ("scan_code", "scan_result", "edit_id", "last_scan"):
+                st.session_state.pop(key, None)
+            go("Medicine")
+    if current:
+        st.divider()
+        confirm = st.checkbox("Confermo di voler spostare questa medicina nel cestino")
+        if st.button("Sposta nel cestino", disabled=not confirm, use_container_width=True):
+            ok, _ = call(service.trash, token, current["id"])
+            if ok:
+                st.session_state.pop("edit_id", None)
+                go("Medicine")
 
-    st.title("La mia farmacia")
-    st.caption(f"Utente: {st.session_state.get('username') or st.session_state.email}")
+def status(row):
+    days = (date.fromisoformat(row["expiry"]) - date.today()).days
+    if days < 0:
+        return 0, "Scaduto", "danger"
+    if row["quantity"] <= row.get("low_stock", 1):
+        return 1, "Scorta bassa", "warning"
+    if days <= row.get("reminder_days", 30):
+        return 2, f"Scade tra {days} giorni", "warning"
+    return 3, "Regolare", "ok"
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Farmaci", len(medicines))
-    c2.metric("In scadenza", expiring)
-    c3.metric("Scaduti", expired)
-    c4.metric("Archivio AIFA", aifa_count())
-
-    st.divider()
-    if not medicines:
-        st.info("Non hai ancora inserito farmaci. Usa 'Aggiungi farmaco' dal menu laterale.")
+def inventory(service, token):
+    ok, rows = call(service.medicines, token)
+    if not ok:
         return
-
-    query = st.text_input("Cerca nei tuoi farmaci", placeholder="Nome, principio attivo o AIC").strip().lower()
-    filtered = []
-    for med in medicines:
-        haystack = " ".join(str(med.get(k) or "") for k in ("nome", "descrizione", "principio_attivo", "aic")).lower()
-        if not query or query in haystack:
-            filtered.append(med)
-
-    for med in filtered:
-        expiry = parse_date(med["scadenza"])
-        days = (expiry - today).days
-        if days < 0:
-            status = f"Scaduto da {-days} giorni"
-        elif days <= 30:
-            status = f"Scade tra {days} giorni"
-        else:
-            status = f"Scadenza {expiry.strftime('%d/%m/%Y')}"
-
-        with st.container(border=True):
-            left, middle, right = st.columns([4, 2, 1])
-            with left:
-                st.subheader(med["nome"])
-                if med.get("principio_attivo"):
-                    st.write(f"Principio attivo: {med['principio_attivo']}")
-                if med.get("aic"):
-                    st.write(f"AIC: {med['aic']}")
-                if med.get("descrizione"):
-                    st.write(med["descrizione"])
-                st.caption(status)
-            with middle:
-                qty = st.number_input(
-                    f"Quantità ({med['tipo']})",
-                    min_value=0,
-                    value=int(med["quantita"]),
-                    step=1,
-                    key=f"qty_{med['id']}",
-                )
-                if qty != int(med["quantita"]):
-                    if st.button("Salva quantità", key=f"save_{med['id']}"):
-                        update_quantity(med["id"], qty)
-                        st.rerun()
-            with right:
-                if st.button("Elimina", key=f"delete_{med['id']}"):
-                    delete_medicine(med["id"])
-                    st.rerun()
-
-
-def show_add():
-    st.title("Aggiungi farmaco")
-    st.subheader("Ricerca AIFA")
-    aic_search = st.text_input("Codice AIC", placeholder="Es. 012345678")
-    found = None
-    if aic_search:
-        try:
-            found = find_aifa(aic_search)
-        except Exception as exc:
-            st.warning(f"Ricerca AIFA non disponibile: {exc}")
-        if found:
-            st.success("Farmaco trovato nell'archivio AIFA.")
-            st.write(f"**{found['descrizione']}**")
-            if found.get("principio_attivo"):
-                st.write(f"Principio attivo: {found['principio_attivo']}")
-            if found.get("ditta"):
-                st.caption(f"Ditta: {found['ditta']}")
-
-    with st.form("add_medicine_form"):
-        nome = st.text_input("Nome farmaco", value=(found or {}).get("descrizione", ""))
-        principio = st.text_input("Principio attivo", value=(found or {}).get("principio_attivo") or "")
-        descrizione = st.text_area("Descrizione / note")
-        c1, c2 = st.columns(2)
-        quantita = c1.number_input("Quantità", min_value=0, value=1, step=1)
-        tipo = c2.selectbox("Unità", ["Pezzi", "Compresse", "Bustine", "Flaconi", "Altro"])
-        scadenza = st.date_input("Data di scadenza", min_value=date.today())
-        aic = st.text_input("AIC", value=(found or {}).get("aic") or aic_search)
-        submitted = st.form_submit_button("Salva farmaco", use_container_width=True)
-    if submitted:
-        if not nome.strip():
-            st.error("Inserisci il nome del farmaco.")
-        else:
-            add_medicine(nome, descrizione, principio, quantita, tipo, scadenza, aic)
-            st.success("Farmaco aggiunto.")
-            st.session_state.page = "I miei farmaci"
-            st.rerun()
-
-
-def show_aifa():
-    st.title("Archivio AIFA")
-    try:
-        count = aifa_count()
-    except Exception:
-        count = 0
-    st.write(f"Record presenti per il tuo account: **{count:,}**".replace(",", "."))
-    st.caption("Carica il file confezioni.csv. L'archivio è privato e associato al tuo account.")
-    uploaded = st.file_uploader("Carica confezioni.csv", type=["csv"])
-    if uploaded is not None and st.button("Importa archivio AIFA", type="primary"):
-        try:
-            with st.spinner("Importazione in corso..."):
-                count = import_aifa(uploaded)
-            st.success(f"Importati {count:,} record.".replace(",", "."))
-        except Exception as exc:
-            st.error(f"Importazione non riuscita: {exc}")
-
-
-def show_export():
-    st.title("Esporta i miei farmaci")
-    rows = list_medicines()
+    rows = sorted(rows, key=lambda row: (status(row)[0], row["expiry"], row["name"].lower()))
+    hero("La mia farmacia", f"{len(rows)} medicinali registrati")
+    if st.button("＋ Scansiona una confezione", type="primary", use_container_width=True):
+        go("Aggiungi")
     if not rows:
-        st.info("Non ci sono farmaci da esportare.")
+        st.info("Non hai ancora medicine. Premi il pulsante qui sopra per scansionare la prima confezione.")
         return
-    df = pd.DataFrame(rows)
-    wanted = ["nome", "descrizione", "principio_attivo", "quantita", "tipo", "scadenza", "aic"]
-    df = df[[c for c in wanted if c in df.columns]]
+    query = st.text_input("Cerca per nome, principio attivo, AIC o barcode").strip().lower()
+    visible = [row for row in rows if query in " ".join(str(row.get(k) or "") for k in
+               ("name", "active_ingredient", "aic", "barcode")).lower()]
+    if not visible:
+        st.info("Nessun farmaco corrisponde alla ricerca.")
+    for row in visible:
+        _, label, css = status(row)
+        with st.container(border=True):
+            st.markdown(f'<span class="badge {css}">{label}</span>', unsafe_allow_html=True)
+            a, b = st.columns([5, 1])
+            a.subheader(row["name"])
+            a.write(f'{row["quantity"]} {row["unit"]} · scadenza {datetime.fromisoformat(row["expiry"]).strftime("%d/%m/%Y")}')
+            if row.get("active_ingredient"):
+                a.caption("Principio attivo: " + row["active_ingredient"])
+            if b.button("Modifica", key="edit" + row["id"]):
+                st.session_state.edit_id = row["id"]
+                go("Aggiungi")
+
+def trash_page(service, token):
+    ok, rows = call(service.medicines, token, True)
+    if not ok:
+        return
+    hero("Cestino", "Ripristina o elimina definitivamente")
+    if not rows:
+        st.info("Il cestino è vuoto.")
+    for row in rows:
+        with st.container(border=True):
+            a, b, c = st.columns([4, 1, 1])
+            a.write(row["name"])
+            if b.button("Ripristina", key="r" + row["id"]):
+                call(service.restore, token, row["id"]); st.rerun()
+            confirm = st.checkbox("Conferma", key="c" + row["id"])
+            if c.button("Elimina", key="d" + row["id"], disabled=not confirm):
+                call(service.delete, token, row["id"]); st.rerun()
+
+def catalog(service, token, user):
+    hero("Catalogo AIFA", "Anagrafica ufficiale condivisa")
+    if user["email"] != str(service.config.get("ADMIN_EMAIL", "")).strip().lower():
+        st.info("Il catalogo viene aggiornato dal gestore.")
+        return
+    confirm = st.checkbox("Confermo l'aggiornamento dal portale AIFA")
+    if st.button("Scarica e aggiorna da AIFA", type="primary", disabled=not confirm):
+        bar = st.progress(0, "Download catalogo…")
+        try:
+            rows = download_official_catalog()
+            service.replace_catalog(token, rows, lambda value: bar.progress(value, "Importazione in corso…"))
+            st.success(f"Importate {len(rows):,} confezioni.")
+        except Exception:
+            st.error("Aggiornamento non riuscito: il catalogo precedente è rimasto intatto.")
+
+def data_page(service, token, user):
+    ok, rows = call(service.medicines, token)
+    if not ok:
+        return
+    hero("Dati e calendario", "Scarica una copia delle tue medicine e i promemoria")
+    converted = [{"id": r["id"], "nome": r["name"], "principio_attivo": r.get("active_ingredient"),
+                  "quantita": r["quantity"], "tipo": r["unit"], "scadenza": r["expiry"], "aic": r.get("aic")}
+                 for r in rows]
+    df = pd.DataFrame(converted)
     st.dataframe(df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "Scarica CSV",
-        data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="i_miei_farmaci.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    a, b, c = st.columns(3)
+    a.download_button("Scarica CSV", df.to_csv(index=False).encode("utf-8-sig"), "medicine.csv", use_container_width=True)
+    b.download_button("Calendario ICS", medicines_to_ics(converted), "scadenze.ics", use_container_width=True)
+    c.download_button("Rapporto PDF", build_inventory_pdf(converted, user["email"]), "medicine.pdf", use_container_width=True)
 
+def account_page(service, token, user):
+    hero("Account e privacy", "Gestisci accessi e dati personali")
+    st.write(f"**{user['name']}** · {user['email']}")
+    with st.expander("Informativa privacy"):
+        st.markdown(open("PRIVACY.md", encoding="utf-8").read())
+    if st.button("Revoca il collegamento personale", use_container_width=True):
+        ok, _ = call(service.revoke_link, token)
+        if ok:
+            st.success("Collegamento revocato. Potrai richiederne uno nuovo dalla pagina iniziale.")
+    if st.button("Disconnetti tutti i dispositivi", use_container_width=True):
+        ok, _ = call(service.logout_all, token)
+        if ok:
+            st.session_state.clear(); st.rerun()
+    st.subheader("Elimina account")
+    phrase = st.text_input('Scrivi "ELIMINA" per cancellare definitivamente account e medicine')
+    if st.button("Elimina definitivamente", disabled=phrase != "ELIMINA", type="primary", use_container_width=True):
+        ok, _ = call(service.delete_account, token)
+        if ok:
+            st.session_state.clear(); st.rerun()
 
-if not restore_session():
-    show_login()
-    st.stop()
-
-with st.sidebar:
-    st.title("I miei farmaci")
-    st.caption(st.session_state.get("email", ""))
-    choices = ["I miei farmaci", "Aggiungi farmaco", "Archivio AIFA", "Esporta dati"]
-    current = st.session_state.get("page", "I miei farmaci")
-    if current not in choices:
-        current = choices[0]
-    page = st.radio("Menu", choices, index=choices.index(current))
-    st.session_state.page = page
-    st.divider()
-    if st.button("Esci", use_container_width=True):
-        logout()
+def main(service):
+    if not st.session_state.get("token") and st.query_params.get("accesso"):
+        ok, token = call(service.finish_link, st.query_params.get("accesso"))
+        st.query_params.clear()
+        if ok:
+            st.session_state.token = token
+            st.rerun()
+    token = st.session_state.get("token")
+    if not token:
+        auth_page(service)
+        return
+    ok, user = call(service.user, token)
+    if not ok:
+        st.session_state.pop("token", None)
+        return
+    pages = ["Medicine", "Aggiungi", "Cestino", "Catalogo AIFA", "Dati", "Account"]
+    with st.sidebar:
+        st.title("Le mie medicine")
+        st.caption(user["email"])
+        page = st.radio("Menu", pages, index=pages.index(st.session_state.get("page", "Medicine"))
+                        if st.session_state.get("page") in pages else 0)
+        st.session_state.page = page
+        if st.button("Esci", use_container_width=True):
+            service.logout(token); st.session_state.clear(); st.rerun()
+    if page == "Medicine":
+        inventory(service, token)
+    elif page == "Aggiungi":
+        rows = service.medicines(token)
+        current = next((row for row in rows if row["id"] == st.session_state.get("edit_id")), None)
+        editor(service, token, current)
+    elif page == "Cestino":
+        trash_page(service, token)
+    elif page == "Catalogo AIFA":
+        catalog(service, token, user)
+    elif page == "Dati":
+        data_page(service, token, user)
+    else:
+        account_page(service, token, user)
 
 try:
-    if page == "I miei farmaci":
-        show_dashboard()
-    elif page == "Aggiungi farmaco":
-        show_add()
-    elif page == "Archivio AIFA":
-        show_aifa()
-    else:
-        show_export()
-except Exception as exc:
-    st.error(f"Errore di collegamento al database: {exc}")
-    st.caption("Riprova tra qualche secondo. I dati sono salvati su Supabase e non dipendono dal filesystem di Streamlit.")
+    config = dict(st.secrets)
+    required = ("TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN", "ADMIN_EMAIL", "APP_URL", "MAIL_BRIDGE_URL", "MAIL_BRIDGE_SECRET")
+    if not all(config.get(key) for key in required):
+        raise AppError("Completa i Secrets Turso e posta elettronica.")
+    database = Database(config["TURSO_DATABASE_URL"], config["TURSO_AUTH_TOKEN"])
+    database.initialize()
+    main(MedicineService(database, config))
+except (AppError, StorageError) as error:
+    hero("Le mie medicine", "Configurazione richiesta")
+    st.info(str(error))

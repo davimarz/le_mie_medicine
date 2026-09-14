@@ -1,67 +1,60 @@
-# I miei farmaci
+# Le mie medicine
 
-Web app Streamlit per gestire farmaci, quantità e scadenze, con autenticazione e database persistente su Supabase.
+Web app Streamlit per inventario personale, scorte e scadenze. Usa Turso (SQLite distribuito) per la persistenza e un collegamento personale inviato per email per l'accesso. Supabase non è richiesto.
 
-## Architettura
-
-- **Streamlit**: interfaccia web
-- **Supabase Auth**: registrazione e accesso utenti
-- **Supabase PostgreSQL**: farmaci e archivio AIFA persistenti
-- **Row Level Security (RLS)**: ogni utente può leggere e modificare solo i propri dati
-
-Il progetto non usa più SQLite per i dati applicativi, quindi i dati non vengono persi quando Streamlit riavvia l'app.
-
-## Pubblicazione su Streamlit Community Cloud
-
-Usa questi parametri:
-
-- Repository: `davimarz/le_mie_medicine`
-- Branch: `main`
-- Main file path: `app.py`
-
-Le credenziali usate nel codice sono esclusivamente la URL pubblica del progetto Supabase e la **publishable key**. La sicurezza dei dati è gestita dalle policy RLS nel database. Non inserire mai nel repository una `service_role` key.
+> È uno strumento organizzativo: non formula diagnosi, non prescrive farmaci e non suggerisce dosaggi.
 
 ## Funzioni
 
-- registrazione account tramite email
-- login tramite email e password
-- gestione personale dei farmaci
-- quantità e scadenze
-- segnalazione farmaci scaduti o in scadenza
-- ricerca per nome, principio attivo e AIC
-- caricamento di `confezioni.csv` AIFA associato al singolo account
-- esportazione dei propri farmaci in CSV
+- registrazione e accesso passwordless tramite collegamento email;
+- scansione automatica di QR, Data Matrix ed EAN/AIC;
+- ricerca nel catalogo ufficiale AIFA e compilazione assistita;
+- quantità, scadenza, soglia scorta e preavviso;
+- priorità visive per scaduti, scadenze vicine e scorte basse;
+- modifica, cestino, ripristino ed eliminazione confermata;
+- esportazione CSV, PDF e calendario ICS;
+- revoca del link, disconnessione di tutti i dispositivi ed eliminazione account;
+- importazione AIFA tramite staging e sostituzione atomica.
 
-## Database Supabase
-
-Il progetto Supabase dedicato è `I miei farmaci` in regione `eu-central-1`.
-
-Tabelle principali:
-
-- `profiles`
-- `farmaci`
-- `aifa_cache`
-
-Tutte le tabelle applicative hanno Row Level Security attiva.
-
-## Installazione locale
+## Avvio locale
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 streamlit run app.py
 ```
 
-Su Windows:
+## Configurazione
 
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-streamlit run app.py
+Crea un database Turso e inserisci nei Secrets di Streamlit:
+
+- `TURSO_DATABASE_URL`
+- `TURSO_AUTH_TOKEN`
+- `ADMIN_EMAIL`
+- `APP_URL = "https://lemiemedicine.streamlit.app"`
+- `MAIL_BRIDGE_URL`
+- `MAIL_BRIDGE_SECRET` di almeno 32 caratteri
+
+Il bridge email può essere lo stesso Google Apps Script usato dall'app “Cose da fare”: deve accettare il payload JSON firmato HMAC e restituire `{"ok": true}`.
+
+In Streamlit Community Cloud seleziona repository `davimarz/le_mie_medicine`, branch `main` e main file `app.py`. Il file diventa disponibile su `main` dopo il merge della PR.
+
+## Catalogo AIFA
+
+Accedi con l'indirizzo configurato in `ADMIN_EMAIL`, apri **Catalogo AIFA** e avvia l'aggiornamento. Il nuovo catalogo viene caricato in staging; quello attivo viene sostituito solo a importazione completa.
+
+## Test
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+pip-audit
 ```
 
-## File esclusi da Git
+La CI compila tutti i moduli, esegue i test, `pip check` e il controllo delle vulnerabilità.
 
-Il `.gitignore` continua a escludere vecchi database locali, file CSV con dati utenti, `.env`, ambienti virtuali e file temporanei.
+## Privacy
+
+Prima di aprire l'app al pubblico, completa [PRIVACY.md](PRIVACY.md) con i dati reali del titolare e verifica gli obblighi relativi a dati potenzialmente sanitari.
