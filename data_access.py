@@ -42,13 +42,20 @@ class MedicineRepository:
         return self.sb.table("farmaci").delete().eq("id", medicine_id).execute().data
 
     def catalog_lookup(self, value: str):
+        from barcode_scanner import medicine_lookup_candidates
         from medicine_core import normalize_aic
 
-        normalized = normalize_aic(value)
-        by_aic = self.sb.table("aifa_catalog").select("aic,descrizione,principio_attivo,ditta,barcode").eq("aic", normalized).maybe_single().execute()
-        if by_aic.data:
-            return by_aic.data
-        return self.sb.table("aifa_catalog").select("aic,descrizione,principio_attivo,ditta,barcode").eq("barcode", value.strip()).maybe_single().execute().data
+        fields = "aic,descrizione,principio_attivo,ditta,barcode"
+        for candidate in medicine_lookup_candidates(value):
+            by_barcode = self.sb.table("aifa_catalog").select(fields).eq("barcode", candidate).maybe_single().execute()
+            if by_barcode.data:
+                return by_barcode.data
+            normalized = normalize_aic(candidate)
+            if normalized:
+                by_aic = self.sb.table("aifa_catalog").select(fields).eq("aic", normalized).maybe_single().execute()
+                if by_aic.data:
+                    return by_aic.data
+        return None
 
     def catalog_count(self):
         result = self.sb.table("aifa_catalog").select("aic", count="exact").limit(1).execute()
