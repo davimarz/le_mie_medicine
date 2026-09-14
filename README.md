@@ -6,13 +6,13 @@ App Streamlit per inventario personale, scorte, scadenze e registrazione delle i
 
 ## Funzioni
 
-- registrazione, login, recupero e cambio password;
+- registrazione e accesso passwordless tramite collegamento email univoco;
 - sessioni con persistenza dei token ruotati;
 - inserimento e modifica completa dei farmaci;
 - scorte minime, scadenze e promemoria in-app;
 - cestino recuperabile e registro delle attività;
 - piano di assunzione trascritto dall'utente;
-- ricerca tramite AIC o barcode/EAN, compatibile con lettori USB;
+- scansione da fotocamera di QR, Data Matrix e barcode/EAN, con ricerca AIFA;
 - catalogo AIFA condiviso con aggiornamento amministrativo atomico;
 - fotografie private delle confezioni;
 - caregiver in sola lettura con accesso revocabile;
@@ -31,11 +31,13 @@ streamlit run app.py
 
 Configura `SUPABASE_URL` e `SUPABASE_PUBLISHABLE_KEY` tramite Streamlit Secrets o variabili d'ambiente. Non usare mai una secret/service-role key nel client.
 
-Per il recupero password configura inoltre:
+Per i collegamenti di accesso configura inoltre:
 
 1. `APP_URL` con l'indirizzo pubblico Streamlit;
 2. lo stesso indirizzo come **Site URL** e **Redirect URL** in Supabase Auth;
-3. il template email **Reset password** affinché mostri il codice `{{ .Token }}`. L'app verifica il codice come OTP di tipo `recovery`.
+3. il template **Magic Link** con un link nel formato `{{ .SiteURL }}?token_hash={{ .TokenHash }}&type=email`.
+
+Il catalogo viene alimentato con l'[Anagrafica Farmaci AIFA](https://www.aifa.gov.it/liste-dei-farmaci). Il barcode non è garantito per ogni record: quando manca la corrispondenza, l'utente può inserire l'AIC riportato sulla confezione o completare i campi manualmente.
 
 ## Database
 
