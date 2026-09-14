@@ -31,6 +31,12 @@ streamlit run app.py
 
 Configura `SUPABASE_URL` e `SUPABASE_PUBLISHABLE_KEY` tramite Streamlit Secrets o variabili d'ambiente. Non usare mai una secret/service-role key nel client.
 
+Per il recupero password configura inoltre:
+
+1. `APP_URL` con l'indirizzo pubblico Streamlit;
+2. lo stesso indirizzo come **Site URL** e **Redirect URL** in Supabase Auth;
+3. il template email **Reset password** affinché mostri il codice `{{ .Token }}`. L'app verifica il codice come OTP di tipo `recovery`.
+
 ## Database
 
 Le migrazioni versionate sono in `supabase/migrations`. Tutte le tabelle esposte hanno RLS. Le funzioni privilegiate verificano `auth.uid()` o il ruolo amministrativo e negano l'esecuzione ad `anon`.
@@ -45,6 +51,8 @@ pytest -q
 ```
 
 GitHub Actions esegue compilazione, test e controllo delle dipendenze a ogni push e pull request.
+
+Il test RLS transazionale è in `tests/rls_integration.sql`: crea due identità temporanee, verifica isolamento e condivisione caregiver, poi esegue sempre `ROLLBACK`.
 
 ## Privacy
 
