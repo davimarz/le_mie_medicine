@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -11,6 +12,32 @@ from medicine_core import EMAIL_RE, expiry_status, medicines_to_ics, normalize_a
 from pdf_report import build_inventory_pdf
 
 st.set_page_config(page_title="Le mie medicine", page_icon="💊", layout="wide")
+
+
+def apply_theme():
+    st.markdown("""
+    <style>
+    :root { --brand:#087ea4; --ink:#17324d; --soft:#eef8fb; --line:#d9e8ef; }
+    .stApp { background:linear-gradient(180deg,#f7fbfd 0,#fff 280px); color:var(--ink); }
+    [data-testid="stSidebar"] { background:#f0f8fb; border-right:1px solid var(--line); }
+    [data-testid="stMetric"] { background:#fff; border:1px solid var(--line); border-radius:18px; padding:16px; box-shadow:0 8px 24px rgba(23,50,77,.05); }
+    [data-testid="stVerticalBlockBorderWrapper"] { background:#fff; border-color:var(--line)!important; border-radius:18px!important; box-shadow:0 8px 24px rgba(23,50,77,.05); }
+    .hero { padding:22px 24px; border-radius:22px; background:linear-gradient(135deg,#087ea4,#14a3b8); color:white; margin:0 0 20px; box-shadow:0 16px 40px rgba(8,126,164,.2); }
+    .hero h1 { margin:0; color:white; font-size:clamp(1.65rem,4vw,2.25rem); }
+    .hero p { margin:.4rem 0 0; opacity:.9; }
+    .pill { display:inline-block; padding:4px 10px; border-radius:999px; background:var(--soft); color:var(--brand); font-size:.78rem; font-weight:700; }
+    .readonly { background:#fff4d6; color:#7a5600; }
+    .stButton>button, .stDownloadButton>button { border-radius:12px; min-height:42px; font-weight:650; }
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] { border-radius:12px; }
+    @media (max-width:640px){ .block-container{padding:1rem .8rem 5rem}.hero{padding:18px}.hero p{font-size:.9rem} }
+    </style>""", unsafe_allow_html=True)
+
+
+def page_title(title, subtitle):
+    st.markdown(f'<section class="hero"><h1>{title}</h1><p>{subtitle}</p></section>', unsafe_allow_html=True)
+
+
+apply_theme()
 
 
 def setting(name, fallback=""):
@@ -40,9 +67,8 @@ def remember(session):
 
 
 def clear_session():
-    for key in list(st.session_state):
-        if key != "_client":
-            st.session_state.pop(key, None)
+    # Drop the client too: it may retain a refreshed authenticated session.
+    st.session_state.clear()
 
 
 def restore_session():
@@ -67,8 +93,7 @@ def safe_error(label):
 
 
 def login_page():
-    st.title("Le mie medicine")
-    st.caption("Inventario personale di farmaci, scorte e scadenze")
+    page_title("Le mie medicine", "Inventario personale di farmaci, scorte e scadenze")
     st.info("Strumento organizzativo: non sostituisce medico, farmacista o prescrizione.")
     access, register, reset = st.tabs(["Accedi", "Registrati", "Password dimenticata"])
     with access:
@@ -83,19 +108,21 @@ def login_page():
             except Exception:
                 st.error("Email o password non validi.")
     with register:
+        with st.expander("Leggi l'informativa privacy"):
+            st.markdown(Path("PRIVACY.md").read_text(encoding="utf-8"))
         with st.form("register"):
             username = st.text_input("Nome visualizzato")
             email = st.text_input("Email", key="reg_email")
             password = st.text_input("Password", type="password", key="reg_password")
             confirm = st.text_input("Conferma password", type="password")
-            privacy = st.checkbox("Accetto l'informativa privacy")
+            privacy = st.checkbox("Confermo di aver letto l'informativa privacy")
             submit = st.form_submit_button("Crea account", use_container_width=True)
         if submit:
             errors = validate_password(password)
             if not username.strip() or not EMAIL_RE.match(email.strip()): st.error("Nome o email non validi.")
             elif errors: st.error("Password: " + ", ".join(errors) + ".")
             elif password != confirm: st.error("Le password non coincidono.")
-            elif not privacy: st.error("Accetta l'informativa privacy.")
+            elif not privacy: st.error("Leggi e conferma l'informativa privacy.")
             else:
                 try:
                     response = client().auth.sign_up({"email": email.strip().lower(), "password": password, "options": {"data": {"username": username.strip(), "privacy_accepted_at": date.today().isoformat()}}})
@@ -103,10 +130,26 @@ def login_page():
                     st.success("Controlla l'email per confermare la registrazione.")
                 except Exception: safe_error("Registrazione non riuscita")
     with reset:
+        st.caption("Richiedi un codice di recupero, poi inseriscilo qui insieme alla nuova password.")
         email = st.text_input("Email dell'account", key="reset_email")
-        if st.button("Invia link di recupero", use_container_width=True):
-            try: client().auth.reset_password_email(email.strip().lower()); st.success("Se l'indirizzo è registrato riceverai un'email.")
+        if st.button("Invia codice di recupero", use_container_width=True):
+            try: client().auth.reset_password_email(email.strip().lower(), {"redirect_to": setting("APP_URL", "http://localhost:8501")}); st.success("Se l'indirizzo è registrato riceverai un'email.")
             except Exception: safe_error("Invio non riuscito")
+        with st.form("complete_recovery"):
+            code = st.text_input("Codice ricevuto")
+            new_password = st.text_input("Nuova password", type="password")
+            complete = st.form_submit_button("Imposta nuova password", use_container_width=True)
+        if complete:
+            errors = validate_password(new_password)
+            if errors: st.error("Password: " + ", ".join(errors) + ".")
+            else:
+                try:
+                    response = client().auth.verify_otp({"email": email.strip().lower(), "token": code.strip(), "type": "recovery"})
+                    remember(response.session)
+                    client().auth.update_user({"password": new_password})
+                    st.success("Password aggiornata. Ora puoi accedere.")
+                    clear_session()
+                except Exception: safe_error("Codice non valido o scaduto")
 
 
 def form_values(prefix, d):
@@ -133,7 +176,7 @@ def form_values(prefix, d):
 def dashboard(repo):
     meds = repo.medicines()
     alert_items = reminders(meds)
-    st.title("La mia farmacia")
+    page_title("La mia farmacia", "Tutto ciò che richiede attenzione, in un colpo d'occhio")
     a, b, c = st.columns(3); a.metric("Farmaci", len(meds)); b.metric("Promemoria", len(alert_items)); c.metric("Catalogo AIFA", repo.catalog_count())
     for item in alert_items:
         med = item["medicine"]; message = "scorta bassa" if item["kind"] == "stock" else expiry_status(med["scadenza"])[2].lower()
@@ -147,12 +190,15 @@ def dashboard(repo):
             if med.get("photo_path"):
                 try: right.image(repo.signed_photo_url(med["photo_path"]), width=120)
                 except Exception: pass
-            if right.button("Modifica", key=f"edit_{med['id']}"): st.session_state.edit_id=med["id"]; st.session_state.page="Aggiungi o modifica"; st.rerun()
+            if med.get("user_id") == st.session_state.user_id:
+                if right.button("Modifica", key=f"edit_{med['id']}"): st.session_state.edit_id=med["id"]; st.session_state.page="Aggiungi o modifica"; st.rerun()
+            else:
+                right.markdown('<span class="pill readonly">Sola lettura</span>', unsafe_allow_html=True)
 
 
 def editor(repo):
     meds = repo.owned_medicines(); edit_id = st.session_state.get("edit_id"); current = next((m for m in meds if m["id"] == edit_id), None)
-    st.title("Modifica farmaco" if current else "Aggiungi farmaco")
+    page_title("Modifica farmaco" if current else "Aggiungi farmaco", "Registra confezione, scorta, scadenza e indicazioni prescritte")
     lookup = st.text_input("Cerca nel catalogo tramite AIC o barcode")
     found = None
     if lookup:
@@ -174,11 +220,12 @@ def editor(repo):
 
 
 def trash(repo):
-    st.title("Cestino")
+    page_title("Cestino", "Ripristina un elemento o eliminalo definitivamente")
     for med in [m for m in repo.owned_medicines(True) if m.get("deleted_at")]:
         a,b,c=st.columns([4,1,1]); a.write(med["nome"])
         if b.button("Ripristina", key=f"restore_{med['id']}"): repo.restore(med["id"]); st.rerun()
-        if c.button("Elimina definitivamente", key=f"purge_{med['id']}"): repo.permanently_delete(med["id"]); st.rerun()
+        confirm = st.checkbox("Conferma", key=f"confirm_purge_{med['id']}")
+        if c.button("Elimina definitivamente", key=f"purge_{med['id']}", disabled=not confirm): repo.permanently_delete(med["id"]); st.rerun()
 
 
 def treatments(repo):
