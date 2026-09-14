@@ -45,9 +45,9 @@ def validate_password(password: str) -> list[str]:
     return errors
 
 
-def parse_aifa_csv(raw: bytes, max_bytes: int = 25_000_000) -> list[dict]:
+def parse_aifa_csv(raw: bytes, max_bytes: int = 50_000_000) -> list[dict]:
     if len(raw) > max_bytes:
-        raise ValueError("Il CSV supera il limite di 25 MB.")
+        raise ValueError("Il CSV supera il limite di 50 MB.")
     text = None
     for encoding in ("utf-8-sig", "latin-1"):
         try:
