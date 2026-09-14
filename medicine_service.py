@@ -146,7 +146,13 @@ class MedicineService:
 
     def delete_account(self, token):
         user = self.user(token)
-        self.db.execute("DELETE FROM users WHERE id=?", (user["id"],))
+        user_id = user["id"]
+        self.db.batch([
+            ("DELETE FROM sessions WHERE user_id=?", (user_id,)),
+            ("DELETE FROM access_links WHERE user_id=?", (user_id,)),
+            ("DELETE FROM medicines WHERE user_id=?", (user_id,)),
+            ("DELETE FROM users WHERE id=?", (user_id,)),
+        ])
 
     def medicines(self, token, deleted=False):
         user = self.user(token)
