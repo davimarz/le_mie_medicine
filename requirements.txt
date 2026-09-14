@@ -1,6 +1,6 @@
-streamlit==1.49.1
+streamlit==1.54.0
 pandas==2.2.3
 reportlab==4.4.3
-Pillow==11.3.0
+Pillow==12.3.0
 zxing-cpp==2.3.0
-requests==2.32.5
+requests==2.33.0
