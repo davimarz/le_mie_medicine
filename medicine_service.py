@@ -161,14 +161,27 @@ class MedicineService:
             ORDER BY expiry, name""", (user["id"],))
 
     def lookup(self, token, value):
+        _code, medicine = self.lookup_any(token, [value])
+        return medicine
+
+    def lookup_any(self, token, values):
+        """Try every symbol found in one image and return the first AIFA match."""
         self.user(token)
         from barcode_scanner import medicine_lookup_candidates
-        for candidate in medicine_lookup_candidates(value):
+        raw_values = [str(value or "").strip() for value in values if str(value or "").strip()]
+        raw_values.sort(key=lambda value: (0 if re.search(r"A\d{9}", value.upper()) else 1))
+        candidates = []
+        for raw in raw_values:
+            for candidate in medicine_lookup_candidates(raw):
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        for candidate in candidates:
             aic = candidate.zfill(9) if candidate.isdigit() and len(candidate) <= 9 else candidate
             rows = self.db.rows("SELECT * FROM aifa_catalog WHERE barcode=? OR aic=? LIMIT 1",
                                 (candidate, aic))
             if rows:
-                return rows[0]
+                return candidate, rows[0]
+        return (raw_values[0] if raw_values else ""), None
 
     def save(self, token, data, medicine_id=None):
         user = self.user(token)
