@@ -57,3 +57,15 @@ def test_catalog_swap_is_atomic(service):
     app.db.execute("INSERT INTO aifa_catalog(aic,description) VALUES (?,?)", ("000000001", "Vecchio"))
     app.replace_catalog(token, [{"aic": "000000002", "descrizione": "Nuovo"}])
     assert app.db.rows("SELECT description FROM aifa_catalog") == [{"description": "Nuovo"}]
+
+
+def test_lookup_any_prefers_aifa_match_among_multiple_bollino_codes(service):
+    app, token = register(service)
+    app.db.execute(
+        "INSERT INTO aifa_catalog(aic,description) VALUES (?,?)",
+        ("004763114", "ASPIRINA C 10 compresse effervescenti"),
+    )
+    code, medicine = app.lookup_any(token, ["072050014", "A004763114"])
+    assert code == "004763114"
+    assert medicine["aic"] == "004763114"
+    assert medicine["description"].startswith("ASPIRINA C")
