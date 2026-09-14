@@ -49,7 +49,8 @@ def test_trash_restore_and_account_cascade(service):
     app.restore(token, medicine_id)
     assert len(app.medicines(token)) == 1
     app.delete_account(token)
-    assert app.db.rows("SELECT COUNT(*) AS n FROM medicines")[0]["n"] == 0
+    for table in ("users", "sessions", "access_links", "medicines"):
+        assert app.db.rows(f"SELECT COUNT(*) AS n FROM {table}")[0]["n"] == 0
 
 def test_catalog_swap_is_atomic(service):
     app, token = register(service, "admin@example.com")
