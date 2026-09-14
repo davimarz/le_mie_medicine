@@ -151,7 +151,7 @@ def dashboard(repo):
 
 
 def editor(repo):
-    meds = repo.medicines(); edit_id = st.session_state.get("edit_id"); current = next((m for m in meds if m["id"] == edit_id), None)
+    meds = repo.owned_medicines(); edit_id = st.session_state.get("edit_id"); current = next((m for m in meds if m["id"] == edit_id), None)
     st.title("Modifica farmaco" if current else "Aggiungi farmaco")
     lookup = st.text_input("Cerca nel catalogo tramite AIC o barcode")
     found = None
@@ -175,7 +175,7 @@ def editor(repo):
 
 def trash(repo):
     st.title("Cestino")
-    for med in [m for m in repo.medicines(True) if m.get("deleted_at")]:
+    for med in [m for m in repo.owned_medicines(True) if m.get("deleted_at")]:
         a,b,c=st.columns([4,1,1]); a.write(med["nome"])
         if b.button("Ripristina", key=f"restore_{med['id']}"): repo.restore(med["id"]); st.rerun()
         if c.button("Elimina definitivamente", key=f"purge_{med['id']}"): repo.permanently_delete(med["id"]); st.rerun()
@@ -183,7 +183,7 @@ def trash(repo):
 
 def treatments(repo):
     st.title("Piano di assunzione"); st.warning("Registra solo indicazioni ricevute da medico o farmacista; l'app non calcola dosaggi.")
-    meds=repo.medicines()
+    meds=repo.owned_medicines()
     with st.form("treatment"):
         med=st.selectbox("Farmaco", meds, format_func=lambda x:x["nome"], disabled=not meds); instruction=st.text_input("Indicazione prescritta"); times=st.text_input("Orari"); start=st.date_input("Dal"); end=st.date_input("Al", value=None); add=st.form_submit_button("Aggiungi", disabled=not meds)
     if add and instruction.strip(): repo.add_treatment({"medicine_id":med["id"],"instruction":instruction.strip(),"times":times.strip() or None,"start_date":start.isoformat(),"end_date":end.isoformat() if end else None}); st.rerun()
