@@ -1,424 +1,258 @@
-import csv
-import io
-from datetime import date, datetime, timedelta
+import json
+import os
+from datetime import date
 
 import pandas as pd
 import streamlit as st
 from supabase import create_client
 
-SUPABASE_URL = "https://maiildnzyocmdjnodofh.supabase.co"
-SUPABASE_KEY = "sb_publishable_O_ey2wT14cC-RHQdgv6_uA_ql9980Q9"
+from data_access import MedicineRepository
+from medicine_core import EMAIL_RE, expiry_status, medicines_to_ics, normalize_aic, parse_aifa_csv, parse_date, reminders, validate_password
+from pdf_report import build_inventory_pdf
 
-st.set_page_config(
-    page_title="I miei farmaci",
-    page_icon="💊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Le mie medicine", page_icon="💊", layout="wide")
 
 
-def client(authed=True):
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-    if authed and st.session_state.get("access_token") and st.session_state.get("refresh_token"):
-        sb.auth.set_session(st.session_state.access_token, st.session_state.refresh_token)
-    return sb
+def setting(name, fallback=""):
+    try:
+        return st.secrets.get(name, os.getenv(name, fallback))
+    except Exception:
+        return os.getenv(name, fallback)
 
 
-def remember_session(session):
-    st.session_state.access_token = session.access_token
-    st.session_state.refresh_token = session.refresh_token
-    st.session_state.user_id = session.user.id
-    st.session_state.email = session.user.email
+SB_URL = setting("SUPABASE_URL", "https://maiildnzyocmdjnodofh.supabase.co")
+SB_KEY = setting("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_O_ey2wT14cC-RHQdgv6_uA_ql9980Q9")
+
+
+def client():
+    if "_client" not in st.session_state:
+        st.session_state._client = create_client(SB_URL, SB_KEY)
+    return st.session_state._client
+
+
+def remember(session):
+    if session:
+        st.session_state.access_token = session.access_token
+        st.session_state.refresh_token = session.refresh_token
+        st.session_state.user_id = session.user.id
+        st.session_state.email = session.user.email
+        st.session_state.app_metadata = session.user.app_metadata or {}
 
 
 def clear_session():
-    for key in ("access_token", "refresh_token", "user_id", "email", "username", "page"):
-        st.session_state.pop(key, None)
+    for key in list(st.session_state):
+        if key != "_client":
+            st.session_state.pop(key, None)
 
 
 def restore_session():
     if not st.session_state.get("access_token") or not st.session_state.get("refresh_token"):
         return False
     try:
-        result = client().auth.get_user()
-        if not result or not result.user:
-            clear_session()
-            return False
-        st.session_state.user_id = result.user.id
-        st.session_state.email = result.user.email
-        profile = client().table("profiles").select("username").eq("id", result.user.id).maybe_single().execute()
-        if profile.data:
-            st.session_state.username = profile.data.get("username")
+        response = client().auth.set_session(st.session_state.access_token, st.session_state.refresh_token)
+        remember(response.session)  # Persist rotated access and refresh tokens.
+        user = client().auth.get_user().user
+        if not user:
+            raise ValueError("invalid session")
+        profile = client().table("profiles").select("username").eq("id", user.id).maybe_single().execute()
+        st.session_state.username = (profile.data or {}).get("username") or user.email.split("@", 1)[0]
         return True
     except Exception:
         clear_session()
         return False
 
 
-def login(email, password):
-    try:
-        response = client(False).auth.sign_in_with_password({"email": email.strip().lower(), "password": password})
-        remember_session(response.session)
-        profile = client().table("profiles").select("username").eq("id", response.user.id).maybe_single().execute()
-        st.session_state.username = (profile.data or {}).get("username") or email.split("@", 1)[0]
-        return True, "Accesso effettuato."
-    except Exception as exc:
-        return False, f"Accesso non riuscito: {exc}"
+def safe_error(label):
+    st.error(f"{label}. Riprova; se il problema continua contatta l'assistenza.")
 
 
-def register(username, email, password):
-    username = username.strip()
-    email = email.strip().lower()
-    if not username or not email or not password:
-        return False, "Compila tutti i campi."
-    if len(password) < 6:
-        return False, "La password deve contenere almeno 6 caratteri."
-    try:
-        response = client(False).auth.sign_up(
-            {
-                "email": email,
-                "password": password,
-                "options": {"data": {"username": username}},
-            }
-        )
-        if response.session:
-            remember_session(response.session)
-            st.session_state.username = username
-            return True, "Account creato e accesso effettuato."
-        return True, "Account creato. Controlla l'email per confermare la registrazione, poi accedi."
-    except Exception as exc:
-        return False, f"Registrazione non riuscita: {exc}"
-
-
-def logout():
-    try:
-        client().auth.sign_out()
-    except Exception:
-        pass
-    clear_session()
-    st.rerun()
-
-
-def list_medicines():
-    response = (
-        client()
-        .table("farmaci")
-        .select("id,nome,descrizione,principio_attivo,quantita,tipo,scadenza,aic,created_at")
-        .order("nome")
-        .execute()
-    )
-    return response.data or []
-
-
-def add_medicine(nome, descrizione, principio_attivo, quantita, tipo, scadenza, aic):
-    payload = {
-        "user_id": st.session_state.user_id,
-        "nome": nome.strip(),
-        "descrizione": descrizione.strip() or None,
-        "principio_attivo": principio_attivo.strip() or None,
-        "quantita": int(quantita),
-        "tipo": tipo,
-        "scadenza": scadenza.isoformat(),
-        "aic": aic.strip() or None,
-    }
-    client().table("farmaci").insert(payload).execute()
-
-
-def update_quantity(medicine_id, quantity):
-    client().table("farmaci").update({"quantita": int(quantity)}).eq("id", medicine_id).execute()
-
-
-def delete_medicine(medicine_id):
-    client().table("farmaci").delete().eq("id", medicine_id).execute()
-
-
-def find_aifa(aic):
-    code = (aic or "").strip().upper()
-    if code.startswith("A") and code[1:].isdigit():
-        code = code[1:]
-    candidates = [code]
-    if code.isdigit():
-        candidates.append(code.zfill(9))
-        if code.startswith("0"):
-            candidates.append(code[1:])
-    for candidate in dict.fromkeys(candidates):
-        result = (
-            client()
-            .table("aifa_cache")
-            .select("aic,descrizione,principio_attivo,ditta")
-            .eq("aic", candidate)
-            .maybe_single()
-            .execute()
-        )
-        if result.data:
-            return result.data
-    return None
-
-
-def aifa_count():
-    result = client().table("aifa_cache").select("aic", count="exact").limit(1).execute()
-    return result.count or 0
-
-
-def import_aifa(uploaded_file):
-    raw = uploaded_file.getvalue()
-    text = None
-    for encoding in ("utf-8-sig", "latin-1"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    if text is None:
-        raise ValueError("Codifica del CSV non riconosciuta.")
-
-    delimiter = ";" if text[:5000].count(";") >= text[:5000].count(",") else ","
-    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
-    if not reader.fieldnames:
-        raise ValueError("CSV senza intestazioni.")
-
-    rows = []
-    for row in reader:
-        raw_aic = (row.get("codice_aic") or "").strip()
-        if raw_aic.isdigit():
-            raw_aic = raw_aic.zfill(9)
-        denominazione = (row.get("denominazione") or "").strip()
-        descrizione = (row.get("descrizione") or "").strip()
-        ditta = (row.get("ragione_sociale") or "").strip()
-        principio = (row.get("pa_associati") or row.get("principio_attivo") or "").strip()
-        if raw_aic and denominazione:
-            rows.append(
-                {
-                    "user_id": st.session_state.user_id,
-                    "aic": raw_aic,
-                    "descrizione": f"{denominazione} {descrizione}".strip()[:300],
-                    "principio_attivo": principio[:300] or None,
-                    "ditta": ditta[:150] or None,
-                }
-            )
-
-    sb = client()
-    sb.table("aifa_cache").delete().eq("user_id", st.session_state.user_id).execute()
-    batch_size = 500
-    for start in range(0, len(rows), batch_size):
-        sb.table("aifa_cache").upsert(rows[start : start + batch_size], on_conflict="user_id,aic").execute()
-    return len(rows)
-
-
-def parse_date(value):
-    if isinstance(value, date):
-        return value
-    try:
-        return datetime.strptime(str(value), "%Y-%m-%d").date()
-    except Exception:
-        return date.today()
-
-
-def show_login():
-    st.title("I miei farmaci")
-    st.caption("Gestione personale di farmaci, quantità e scadenze")
-    login_tab, register_tab = st.tabs(["Accedi", "Registrati"])
-
-    with login_tab:
-        with st.form("login_form"):
+def login_page():
+    st.title("Le mie medicine")
+    st.caption("Inventario personale di farmaci, scorte e scadenze")
+    st.info("Strumento organizzativo: non sostituisce medico, farmacista o prescrizione.")
+    access, register, reset = st.tabs(["Accedi", "Registrati", "Password dimenticata"])
+    with access:
+        with st.form("login"):
             email = st.text_input("Email")
             password = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Accedi", use_container_width=True)
-        if submitted:
-            ok, message = login(email, password)
-            if ok:
-                st.success(message)
+            submit = st.form_submit_button("Accedi", use_container_width=True)
+        if submit:
+            try:
+                remember(client().auth.sign_in_with_password({"email": email.strip().lower(), "password": password}).session)
                 st.rerun()
-            else:
-                st.error(message)
-
-    with register_tab:
-        with st.form("register_form"):
-            username = st.text_input("Nome utente")
+            except Exception:
+                st.error("Email o password non validi.")
+    with register:
+        with st.form("register"):
+            username = st.text_input("Nome visualizzato")
             email = st.text_input("Email", key="reg_email")
             password = st.text_input("Password", type="password", key="reg_password")
             confirm = st.text_input("Conferma password", type="password")
-            submitted = st.form_submit_button("Crea account", use_container_width=True)
-        if submitted:
-            if password != confirm:
-                st.error("Le password non coincidono.")
+            privacy = st.checkbox("Accetto l'informativa privacy")
+            submit = st.form_submit_button("Crea account", use_container_width=True)
+        if submit:
+            errors = validate_password(password)
+            if not username.strip() or not EMAIL_RE.match(email.strip()): st.error("Nome o email non validi.")
+            elif errors: st.error("Password: " + ", ".join(errors) + ".")
+            elif password != confirm: st.error("Le password non coincidono.")
+            elif not privacy: st.error("Accetta l'informativa privacy.")
             else:
-                ok, message = register(username, email, password)
-                if ok:
-                    st.success(message)
-                    if st.session_state.get("user_id"):
-                        st.rerun()
-                else:
-                    st.error(message)
+                try:
+                    response = client().auth.sign_up({"email": email.strip().lower(), "password": password, "options": {"data": {"username": username.strip(), "privacy_accepted_at": date.today().isoformat()}}})
+                    if response.session: remember(response.session); st.rerun()
+                    st.success("Controlla l'email per confermare la registrazione.")
+                except Exception: safe_error("Registrazione non riuscita")
+    with reset:
+        email = st.text_input("Email dell'account", key="reset_email")
+        if st.button("Invia link di recupero", use_container_width=True):
+            try: client().auth.reset_password_email(email.strip().lower()); st.success("Se l'indirizzo è registrato riceverai un'email.")
+            except Exception: safe_error("Invio non riuscito")
 
 
-def show_dashboard():
-    medicines = list_medicines()
-    today = date.today()
-    expired = sum(parse_date(m["scadenza"]) < today for m in medicines)
-    expiring = sum(today <= parse_date(m["scadenza"]) <= today + timedelta(days=30) for m in medicines)
+def form_values(prefix, d):
+    units = ["Pezzi", "Compresse", "Bustine", "Flaconi", "Altro"]
+    nome = st.text_input("Nome farmaco", value=d.get("nome") or "", key=prefix+"nome")
+    principio = st.text_input("Principio attivo", value=d.get("principio_attivo") or "", key=prefix+"pa")
+    descrizione = st.text_area("Descrizione / note", value=d.get("descrizione") or "", key=prefix+"desc")
+    c1, c2, c3 = st.columns(3)
+    quantita = c1.number_input("Quantità", min_value=0, value=int(d.get("quantita") or 0), key=prefix+"qty")
+    unit = d.get("tipo") if d.get("tipo") in units else "Pezzi"
+    tipo = c2.selectbox("Unità", units, index=units.index(unit), key=prefix+"unit")
+    scadenza = c3.date_input("Scadenza", value=parse_date(d.get("scadenza")), key=prefix+"exp")
+    aic = st.text_input("AIC", value=d.get("aic") or "", key=prefix+"aic")
+    barcode = st.text_input("Barcode / EAN (compatibile con lettori USB)", value=d.get("barcode") or "", key=prefix+"bar")
+    c1, c2 = st.columns(2)
+    soglia = c1.number_input("Soglia scorta", min_value=0, value=int(d.get("soglia_scorta") or 0), key=prefix+"stock")
+    reminder_days = c2.number_input("Preavviso scadenza", 1, 365, int(d.get("reminder_days") or 30), key=prefix+"days")
+    dosaggio = st.text_input("Dosaggio prescritto", value=d.get("dosaggio") or "", key=prefix+"dose")
+    orari = st.text_input("Orari prescritti", value=d.get("orari") or "", key=prefix+"times")
+    note_mediche = st.text_area("Note personali sulla prescrizione", value=d.get("note_mediche") or "", key=prefix+"notes")
+    return {"nome": nome.strip(), "descrizione": descrizione.strip() or None, "principio_attivo": principio.strip() or None, "quantita": int(quantita), "tipo": tipo, "scadenza": scadenza.isoformat(), "aic": normalize_aic(aic) or None, "barcode": barcode.strip() or None, "soglia_scorta": int(soglia), "reminder_days": int(reminder_days), "dosaggio": dosaggio.strip() or None, "orari": orari.strip() or None, "note_mediche": note_mediche.strip() or None}
 
+
+def dashboard(repo):
+    meds = repo.medicines()
+    alert_items = reminders(meds)
     st.title("La mia farmacia")
-    st.caption(f"Utente: {st.session_state.get('username') or st.session_state.email}")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Farmaci", len(medicines))
-    c2.metric("In scadenza", expiring)
-    c3.metric("Scaduti", expired)
-    c4.metric("Archivio AIFA", aifa_count())
-
-    st.divider()
-    if not medicines:
-        st.info("Non hai ancora inserito farmaci. Usa 'Aggiungi farmaco' dal menu laterale.")
-        return
-
-    query = st.text_input("Cerca nei tuoi farmaci", placeholder="Nome, principio attivo o AIC").strip().lower()
-    filtered = []
-    for med in medicines:
-        haystack = " ".join(str(med.get(k) or "") for k in ("nome", "descrizione", "principio_attivo", "aic")).lower()
-        if not query or query in haystack:
-            filtered.append(med)
-
-    for med in filtered:
-        expiry = parse_date(med["scadenza"])
-        days = (expiry - today).days
-        if days < 0:
-            status = f"Scaduto da {-days} giorni"
-        elif days <= 30:
-            status = f"Scade tra {days} giorni"
-        else:
-            status = f"Scadenza {expiry.strftime('%d/%m/%Y')}"
-
+    a, b, c = st.columns(3); a.metric("Farmaci", len(meds)); b.metric("Promemoria", len(alert_items)); c.metric("Catalogo AIFA", repo.catalog_count())
+    for item in alert_items:
+        med = item["medicine"]; message = "scorta bassa" if item["kind"] == "stock" else expiry_status(med["scadenza"])[2].lower()
+        st.warning(f"{med['nome']}: {message}")
+    query = st.text_input("Cerca", placeholder="Nome, principio attivo, AIC o barcode").strip().lower()
+    for med in meds:
+        if query and query not in " ".join(str(med.get(k) or "") for k in ("nome", "principio_attivo", "aic", "barcode", "descrizione")).lower(): continue
         with st.container(border=True):
-            left, middle, right = st.columns([4, 2, 1])
-            with left:
-                st.subheader(med["nome"])
-                if med.get("principio_attivo"):
-                    st.write(f"Principio attivo: {med['principio_attivo']}")
-                if med.get("aic"):
-                    st.write(f"AIC: {med['aic']}")
-                if med.get("descrizione"):
-                    st.write(med["descrizione"])
-                st.caption(status)
-            with middle:
-                qty = st.number_input(
-                    f"Quantità ({med['tipo']})",
-                    min_value=0,
-                    value=int(med["quantita"]),
-                    step=1,
-                    key=f"qty_{med['id']}",
-                )
-                if qty != int(med["quantita"]):
-                    if st.button("Salva quantità", key=f"save_{med['id']}"):
-                        update_quantity(med["id"], qty)
-                        st.rerun()
-            with right:
-                if st.button("Elimina", key=f"delete_{med['id']}"):
-                    delete_medicine(med["id"])
-                    st.rerun()
+            left, right = st.columns([5, 1]); left.subheader(med["nome"]); left.write(f"{med['quantita']} {med['tipo']} · {expiry_status(med['scadenza'])[2]}")
+            if med.get("principio_attivo"): left.caption("Principio attivo: " + med["principio_attivo"])
+            if med.get("photo_path"):
+                try: right.image(repo.signed_photo_url(med["photo_path"]), width=120)
+                except Exception: pass
+            if right.button("Modifica", key=f"edit_{med['id']}"): st.session_state.edit_id=med["id"]; st.session_state.page="Aggiungi o modifica"; st.rerun()
 
 
-def show_add():
-    st.title("Aggiungi farmaco")
-    st.subheader("Ricerca AIFA")
-    aic_search = st.text_input("Codice AIC", placeholder="Es. 012345678")
+def editor(repo):
+    meds = repo.medicines(); edit_id = st.session_state.get("edit_id"); current = next((m for m in meds if m["id"] == edit_id), None)
+    st.title("Modifica farmaco" if current else "Aggiungi farmaco")
+    lookup = st.text_input("Cerca nel catalogo tramite AIC o barcode")
     found = None
-    if aic_search:
+    if lookup:
+        try: found = repo.catalog_lookup(lookup)
+        except Exception: safe_error("Catalogo non disponibile")
+    defaults = current or ({"nome": (found or {}).get("descrizione", ""), "principio_attivo": (found or {}).get("principio_attivo", ""), "aic": (found or {}).get("aic", ""), "barcode": (found or {}).get("barcode", ""), "quantita": 1} if found else {"quantita": 1})
+    with st.form(f"medicine_{edit_id or 'new'}"):
+        payload = form_values(str(edit_id or "new"), defaults); photo = st.file_uploader("Foto confezione (massimo 5 MB)", type=["jpg", "jpeg", "png", "webp"]); save = st.form_submit_button("Salva", type="primary", use_container_width=True)
+    if save:
+        if not payload["nome"]: st.error("Il nome è obbligatorio."); return
         try:
-            found = find_aifa(aic_search)
-        except Exception as exc:
-            st.warning(f"Ricerca AIFA non disponibile: {exc}")
-        if found:
-            st.success("Farmaco trovato nell'archivio AIFA.")
-            st.write(f"**{found['descrizione']}**")
-            if found.get("principio_attivo"):
-                st.write(f"Principio attivo: {found['principio_attivo']}")
-            if found.get("ditta"):
-                st.caption(f"Ditta: {found['ditta']}")
+            if photo: payload["photo_path"] = repo.upload_photo(photo)
+            repo.update_medicine(current["id"], payload) if current else repo.create_medicine(payload)
+            st.session_state.pop("edit_id", None); st.session_state.page="I miei farmaci"; st.rerun()
+        except Exception: safe_error("Salvataggio non riuscito")
+    if current:
+        confirmed = st.checkbox("Confermo lo spostamento nel cestino")
+        if st.button("Sposta nel cestino", disabled=not confirmed): repo.trash(current["id"]); st.session_state.pop("edit_id", None); st.rerun()
 
-    with st.form("add_medicine_form"):
-        nome = st.text_input("Nome farmaco", value=(found or {}).get("descrizione", ""))
-        principio = st.text_input("Principio attivo", value=(found or {}).get("principio_attivo") or "")
-        descrizione = st.text_area("Descrizione / note")
-        c1, c2 = st.columns(2)
-        quantita = c1.number_input("Quantità", min_value=0, value=1, step=1)
-        tipo = c2.selectbox("Unità", ["Pezzi", "Compresse", "Bustine", "Flaconi", "Altro"])
-        scadenza = st.date_input("Data di scadenza", min_value=date.today())
-        aic = st.text_input("AIC", value=(found or {}).get("aic") or aic_search)
-        submitted = st.form_submit_button("Salva farmaco", use_container_width=True)
-    if submitted:
-        if not nome.strip():
-            st.error("Inserisci il nome del farmaco.")
+
+def trash(repo):
+    st.title("Cestino")
+    for med in [m for m in repo.medicines(True) if m.get("deleted_at")]:
+        a,b,c=st.columns([4,1,1]); a.write(med["nome"])
+        if b.button("Ripristina", key=f"restore_{med['id']}"): repo.restore(med["id"]); st.rerun()
+        if c.button("Elimina definitivamente", key=f"purge_{med['id']}"): repo.permanently_delete(med["id"]); st.rerun()
+
+
+def treatments(repo):
+    st.title("Piano di assunzione"); st.warning("Registra solo indicazioni ricevute da medico o farmacista; l'app non calcola dosaggi.")
+    meds=repo.medicines()
+    with st.form("treatment"):
+        med=st.selectbox("Farmaco", meds, format_func=lambda x:x["nome"], disabled=not meds); instruction=st.text_input("Indicazione prescritta"); times=st.text_input("Orari"); start=st.date_input("Dal"); end=st.date_input("Al", value=None); add=st.form_submit_button("Aggiungi", disabled=not meds)
+    if add and instruction.strip(): repo.add_treatment({"medicine_id":med["id"],"instruction":instruction.strip(),"times":times.strip() or None,"start_date":start.isoformat(),"end_date":end.isoformat() if end else None}); st.rerun()
+    for row in repo.treatments():
+        a,b=st.columns([5,1]); a.write(f"{row['instruction']} · {row.get('times') or 'orario non indicato'}")
+        if b.button("Rimuovi",key=f"treat_{row['id']}"): repo.delete_treatment(row["id"]); st.rerun()
+
+
+def caregivers(repo):
+    st.title("Accesso caregiver"); st.caption("Il caregiver deve avere un account e riceve accesso in sola lettura.")
+    with st.form("invite"):
+        email=st.text_input("Email caregiver"); label=st.text_input("Etichetta"); invite=st.form_submit_button("Condividi")
+    if invite:
+        try: repo.invite_caregiver(email,label); st.success("Accesso condiviso."); st.rerun()
+        except Exception: safe_error("Condivisione non riuscita; verifica che l'account esista")
+    for share in repo.shares():
+        a,b=st.columns([5,1]); a.write(share.get("label") or "Caregiver")
+        if share.get("owner_id")==st.session_state.user_id and b.button("Revoca",key=f"share_{share['id']}"): repo.remove_share(share["id"]); st.rerun()
+
+
+def data_page(repo):
+    st.title("Esporta, importa e calendario"); rows=repo.medicines(); df=pd.DataFrame(rows); st.dataframe(df,use_container_width=True,hide_index=True)
+    clean=[{k:v for k,v in row.items() if k not in {"id","user_id","created_at","updated_at","deleted_at"}} for row in rows]
+    a,b,c,d=st.columns(4); a.download_button("CSV",df.to_csv(index=False).encode("utf-8-sig"),"medicine.csv"); b.download_button("Backup JSON",json.dumps(clean,ensure_ascii=False,default=str,indent=2),"medicine-backup.json"); c.download_button("Calendario",medicines_to_ics(rows),"scadenze.ics"); d.download_button("PDF",build_inventory_pdf(rows,st.session_state.email),"medicine.pdf")
+    backup=st.file_uploader("Ripristina backup JSON",type=["json"])
+    if backup and st.button("Importa backup"):
+        try:
+            payload=json.loads(backup.getvalue().decode()); assert isinstance(payload,list) and len(payload)<=1000
+            allowed={"nome","descrizione","principio_attivo","quantita","tipo","scadenza","aic","barcode","soglia_scorta","reminder_days","dosaggio","orari","note_mediche"}
+            for row in payload:
+                item={k:v for k,v in row.items() if k in allowed}
+                if item.get("nome") and item.get("scadenza"): repo.create_medicine(item)
+            st.success("Backup importato."); st.rerun()
+        except Exception: st.error("Backup non valido.")
+
+
+def catalog(repo):
+    st.title("Catalogo AIFA condiviso"); st.write(f"Record: **{repo.catalog_count():,}**".replace(",","."))
+    if st.session_state.get("app_metadata",{}).get("role")!="admin": st.info("Il catalogo è aggiornato centralmente dagli amministratori."); return
+    upload=st.file_uploader("CSV AIFA",type=["csv"]); confirm=st.checkbox("Confermo la sostituzione atomica")
+    if upload and st.button("Aggiorna catalogo",disabled=not confirm):
+        try: rows=parse_aifa_csv(upload.getvalue()); repo.import_catalog(rows); st.success(f"Importati {len(rows):,} record.")
+        except Exception: safe_error("Aggiornamento non riuscito")
+
+
+def account(repo):
+    st.title("Account, privacy e attività"); st.markdown("I dati servono esclusivamente all'inventario personale. Puoi esportarli o eliminare l'account. L'app non fornisce diagnosi o prescrizioni.")
+    with st.form("password"):
+        password=st.text_input("Nuova password",type="password"); change=st.form_submit_button("Cambia password")
+    if change:
+        errors=validate_password(password)
+        if errors: st.error("Password: "+", ".join(errors)+".")
         else:
-            add_medicine(nome, descrizione, principio, quantita, tipo, scadenza, aic)
-            st.success("Farmaco aggiunto.")
-            st.session_state.page = "I miei farmaci"
-            st.rerun()
+            try: client().auth.update_user({"password":password}); st.success("Password aggiornata.")
+            except Exception: safe_error("Modifica non riuscita")
+    with st.expander("Registro attività"): st.dataframe(pd.DataFrame(repo.audit_events()),use_container_width=True,hide_index=True)
+    phrase=st.text_input("Per eliminare account e dati scrivi ELIMINA")
+    if st.button("Elimina definitivamente il mio account",disabled=phrase!="ELIMINA"):
+        try: client().rpc("delete_own_account").execute(); clear_session(); st.rerun()
+        except Exception: safe_error("Eliminazione non riuscita")
 
 
-def show_aifa():
-    st.title("Archivio AIFA")
-    try:
-        count = aifa_count()
-    except Exception:
-        count = 0
-    st.write(f"Record presenti per il tuo account: **{count:,}**".replace(",", "."))
-    st.caption("Carica il file confezioni.csv. L'archivio è privato e associato al tuo account.")
-    uploaded = st.file_uploader("Carica confezioni.csv", type=["csv"])
-    if uploaded is not None and st.button("Importa archivio AIFA", type="primary"):
-        try:
-            with st.spinner("Importazione in corso..."):
-                count = import_aifa(uploaded)
-            st.success(f"Importati {count:,} record.".replace(",", "."))
-        except Exception as exc:
-            st.error(f"Importazione non riuscita: {exc}")
-
-
-def show_export():
-    st.title("Esporta i miei farmaci")
-    rows = list_medicines()
-    if not rows:
-        st.info("Non ci sono farmaci da esportare.")
-        return
-    df = pd.DataFrame(rows)
-    wanted = ["nome", "descrizione", "principio_attivo", "quantita", "tipo", "scadenza", "aic"]
-    df = df[[c for c in wanted if c in df.columns]]
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "Scarica CSV",
-        data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="i_miei_farmaci.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-
-if not restore_session():
-    show_login()
-    st.stop()
-
+if not restore_session(): login_page(); st.stop()
+repo=MedicineRepository(client(),st.session_state.user_id)
+pages={"I miei farmaci":dashboard,"Aggiungi o modifica":editor,"Piano di assunzione":treatments,"Cestino":trash,"Caregiver":caregivers,"Catalogo AIFA":catalog,"Dati e calendario":data_page,"Account e privacy":account}
 with st.sidebar:
-    st.title("I miei farmaci")
-    st.caption(st.session_state.get("email", ""))
-    choices = ["I miei farmaci", "Aggiungi farmaco", "Archivio AIFA", "Esporta dati"]
-    current = st.session_state.get("page", "I miei farmaci")
-    if current not in choices:
-        current = choices[0]
-    page = st.radio("Menu", choices, index=choices.index(current))
-    st.session_state.page = page
-    st.divider()
-    if st.button("Esci", use_container_width=True):
-        logout()
-
-try:
-    if page == "I miei farmaci":
-        show_dashboard()
-    elif page == "Aggiungi farmaco":
-        show_add()
-    elif page == "Archivio AIFA":
-        show_aifa()
-    else:
-        show_export()
-except Exception as exc:
-    st.error(f"Errore di collegamento al database: {exc}")
-    st.caption("Riprova tra qualche secondo. I dati sono salvati su Supabase e non dipendono dal filesystem di Streamlit.")
+    st.title("Le mie medicine"); st.caption(st.session_state.email); current=st.session_state.get("page","I miei farmaci"); page=st.radio("Menu",list(pages),index=list(pages).index(current) if current in pages else 0); st.session_state.page=page
+    if st.button("Esci",use_container_width=True):
+        try: client().auth.sign_out()
+        finally: clear_session(); st.rerun()
+try: pages[page](repo)
+except Exception: safe_error("Operazione non disponibile")
